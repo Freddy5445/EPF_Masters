@@ -1,6 +1,15 @@
 # Python virtual environment
 .venv/
 
+# Secrets - ENTSO-E security token lives here
+.env
+
+# Cached raw API responses
+.cache/
+
 # Python bytecode
 __pycache__/
 *.py[cod]
+
+# csv files
+*.csv

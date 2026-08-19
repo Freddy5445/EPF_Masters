@@ -1,0 +1,4 @@
+# Runtime dependencies for entsoe_tp (both already present in .venv).
+# The vendored epftoolbox declares its own, much heavier, set in epftoolbox/setup.py.
+pandas>=1.0
+requests>=2.20
