@@ -173,7 +173,7 @@ def _column_specs(area, exog):
 
 
 def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
-          exog="load-windsolar", quiet=False):
+          exog="load-windsolar", allow_gaps=False, quiet=False):
     """Fetch and assemble the dataset. Returns the finished DataFrame."""
     area = lookup(zone)
     start_date = pd.Timestamp(start).normalize()
@@ -224,14 +224,15 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
                 f"Check that this zone publishes that data item for the requested range."
             )
         columns[label] = to_local_hourly_grid(
-            series, area.tz, start_date, end_date, max_gap=max_gap
+            series, area.tz, start_date, end_date, max_gap=max_gap,
+            allow_gaps=allow_gaps,
         )
 
     frame = pd.DataFrame(columns)
     # Naive local market time, not UTC -- see hourly.py. Named explicitly so the
     # CSV is unambiguous on its own, without requiring this module's docstring.
     frame.index.name = f"Date ({area.tz} local time, naive, ISO 8601)"
-    assert_epftoolbox_grid(frame)
+    assert_epftoolbox_grid(frame, allow_nan=allow_gaps)
 
     return frame
 
@@ -254,6 +255,11 @@ def main(argv=None):
                         help="Exogenous layout: 'load-windsolar' (2 columns, default) "
                              "or 'load-wind-solar' (3 columns, renewables split by "
                              "production type)")
+    parser.add_argument("--allow-gaps", action="store_true",
+                        help="Write the dataset even where data is missing, leaving "
+                             "NaN instead of aborting. Runs up to --max-gap are "
+                             "still interpolated; use --max-gap 0 to interpolate "
+                             "nothing. The result cannot be fed to a model as-is.")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
     args = parser.parse_args(argv)
 
@@ -269,6 +275,7 @@ def main(argv=None):
             cache_dir=None if args.no_cache else DEFAULT_CACHE,
             max_gap=args.max_gap,
             exog=args.exog,
+            allow_gaps=args.allow_gaps,
             quiet=args.quiet,
         )
     except (KeyError, ValueError, GridError, TransparencyError) as exc:
@@ -283,6 +290,10 @@ def main(argv=None):
     print(f"\nWrote {out}")
     print(f"  {len(frame)} rows ({days} days), {frame.index[0]} to {frame.index[-1]}")
     print(f"  columns: {list(frame.columns)}")
+
+    missing = frame.isna().sum()
+    if missing.any():
+        print(f"  missing values: {missing.to_dict()}")
 
     # read_data's years_test split counts 364-day "years" and does positional
     # arithmetic on the index, so ranges that are not whole 364-day blocks put

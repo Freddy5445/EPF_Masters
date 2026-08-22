@@ -27,7 +27,8 @@ class GridError(ValueError):
     """Raised when a series cannot be coerced to the required hourly grid."""
 
 
-def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3):
+def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3,
+                         allow_gaps=False):
     """Convert a UTC-indexed series to a naive local hourly grid.
 
     ``start_date`` and ``end_date`` are dates (inclusive); the result spans
@@ -37,6 +38,12 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3):
     Fall-back duplicates are averaged, the spring-forward hour is interpolated,
     and any remaining gap up to ``max_gap`` hours is interpolated with a warning.
     A longer gap raises :class:`GridError` rather than quietly inventing data.
+
+    With ``allow_gaps=True`` a long gap is left as NaN instead of raising, so the
+    caller gets the data that does exist and can decide what to do about the
+    rest. Runs up to ``max_gap`` are still interpolated; pass ``max_gap=0`` to
+    interpolate nothing. Note the result then violates the epftoolbox
+    no-NaN invariant, so it cannot be fed to a model as-is.
     """
     if series_utc.empty:
         raise GridError("No data returned for the requested range")
@@ -64,17 +71,26 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3):
     missing = aligned.index[aligned.isna()]
     real_gaps = missing.difference(dst_missing)
 
+    keep_missing = pd.DatetimeIndex([])
     if len(real_gaps):
-        _check_gap_lengths(real_gaps, max_gap)
+        if allow_gaps:
+            # Interpolating across a long gap invents data, so those hours stay
+            # NaN; only runs within max_gap are filled.
+            keep_missing = _runs_longer_than(real_gaps, max_gap)
+        else:
+            _check_gap_lengths(real_gaps, max_gap)
         warnings.warn(
-            f"Interpolating {len(real_gaps)} missing hour(s) not explained by DST, "
-            f"first at {real_gaps[0]}, last at {real_gaps[-1]}",
+            f"Interpolating {len(real_gaps) - len(keep_missing)} missing hour(s) "
+            f"not explained by DST, first at {real_gaps[0]}, last at {real_gaps[-1]}",
             stacklevel=2,
         )
 
     filled = aligned.interpolate(method="linear", limit_area="inside")
 
-    if filled.isna().any():
+    if len(keep_missing):
+        filled.loc[keep_missing] = float("nan")
+
+    if filled.isna().any() and not allow_gaps:
         edge = filled.index[filled.isna()]
         raise GridError(
             f"{len(edge)} hour(s) at the edges of the range have no data and cannot "
@@ -83,6 +99,28 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3):
         )
 
     return filled
+
+
+def _runs_longer_than(gap_index, max_gap):
+    """Hours belonging to a run of consecutive missing hours longer than ``max_gap``."""
+    if not len(gap_index):
+        return pd.DatetimeIndex([])
+
+    keep = []
+    run = [gap_index[0]]
+
+    for timestamp in gap_index[1:]:
+        if timestamp - run[-1] == pd.Timedelta(hours=1):
+            run.append(timestamp)
+        else:
+            if len(run) > max_gap:
+                keep.extend(run)
+            run = [timestamp]
+
+    if len(run) > max_gap:
+        keep.extend(run)
+
+    return pd.DatetimeIndex(keep)
 
 
 def _check_gap_lengths(gap_index, max_gap):
@@ -103,7 +141,7 @@ def _check_gap_lengths(gap_index, max_gap):
         previous = timestamp
 
 
-def assert_epftoolbox_grid(frame):
+def assert_epftoolbox_grid(frame, allow_nan=False):
     """Validate the invariant ``read_data`` and the models silently assume.
 
     Raises :class:`GridError` on violation. Failing here is far cheaper than the
@@ -133,6 +171,8 @@ def assert_epftoolbox_grid(frame):
             f"Range must start at 00:00 and end at 23:00, got {index[0]} to {index[-1]}"
         )
 
-    if frame.isna().any().any():
+    # The shape invariants above always hold. NaN is the one thing a caller may
+    # deliberately accept, to inspect partial data before deciding what to do.
+    if not allow_nan and frame.isna().any().any():
         counts = frame.isna().sum()
         raise GridError(f"Frame still contains NaN values: {counts.to_dict()}")
