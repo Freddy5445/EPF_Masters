@@ -43,7 +43,26 @@ _TS_ATTRS = (
     "curveType",
     "inBiddingZone_Domain.mRID",
     "outBiddingZone_Domain.mRID",
+    # Units, so a column can be labelled with what it actually holds rather than
+    # an assumed one. Currency varies by zone (not every market publishes EUR).
+    "currency_Unit.name",
+    "price_Measure_Unit.name",
+    "quantity_Measure_Unit.name",
 )
+
+# ENTSO-E unit codes, mapped to how they are normally written.
+UNIT_NAMES = {
+    "MAW": "MW",
+    "MWH": "MWh",
+    "KWH": "kWh",
+}
+
+
+def unit_label(code):
+    """Human-readable form of an ENTSO-E unit code, or the code itself."""
+    if not code:
+        return None
+    return UNIT_NAMES.get(code.upper(), code)
 
 
 class TransparencyError(RuntimeError):
