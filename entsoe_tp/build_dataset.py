@@ -6,27 +6,29 @@ Build an epftoolbox-compatible dataset from the Transparency Platform.
 Writes ``datasets/<ZONE>.csv``. Two exogenous layouts are available, chosen with
 ``--exog``.
 
-``--exog load-windsolar`` (default) gives ``Date, Price, Exogenous 1, Exogenous 2``:
+Columns are named for what they hold, with the unit taken from the document
+itself (currency varies by market, so it is never assumed).
 
-===============  =========================================  ==========================
-Column           Data item                                  Query
-===============  =========================================  ==========================
-Price            Day-ahead prices [12.1.D]                  ``A44``
-Exogenous 1      Day-ahead total load forecast [6.1.B]      ``A65`` + ``processType=A01``
-Exogenous 2      Day-ahead wind & solar forecast [14.1.D]   ``A69`` + ``processType=A01``
-===============  =========================================  ==========================
+``--exog load-windsolar`` (default):
 
-``--exog load-wind-solar`` splits the renewables by production type, giving
-``Date, Price, Exogenous 1, Exogenous 2, Exogenous 3``:
+==========================================  =========================  ==========================
+Column                                      Data item                  Query
+==========================================  =========================  ==========================
+Day-ahead price (EUR/MWh)                   Day-ahead prices [12.1.D]  ``A44``
+Day-ahead load forecast (MW)                Total load forecast        ``A65`` + ``processType=A01``
+Day-ahead wind and solar forecast (MW)      Wind & solar [14.1.D]      ``A69`` + ``processType=A01``
+==========================================  =========================  ==========================
 
-===============  =========================================  ==========================
-Column           Data item                                  Query
-===============  =========================================  ==========================
-Price            Day-ahead prices [12.1.D]                  ``A44``
-Exogenous 1      Day-ahead total load forecast [6.1.B]      ``A65`` + ``processType=A01``
-Exogenous 2      Day-ahead wind forecast (on+offshore)      ``A69``, ``psrType`` B18+B19
-Exogenous 3      Day-ahead solar forecast                   ``A69``, ``psrType`` B16
-===============  =========================================  ==========================
+``--exog load-wind-solar`` splits the renewables by production type:
+
+==========================================  =========================  ==========================
+Column                                      Data item                  Query
+==========================================  =========================  ==========================
+Day-ahead price (EUR/MWh)                   Day-ahead prices [12.1.D]  ``A44``
+Day-ahead load forecast (MW)                Total load forecast        ``A65`` + ``processType=A01``
+Day-ahead wind forecast (on- and offshore)  Wind [14.1.D]              ``A69``, ``psrType`` B18+B19
+Day-ahead solar forecast (MW)               Solar [14.1.D]             ``A69``, ``psrType`` B16
+==========================================  =========================  ==========================
 
 The A69 document carries one TimeSeries per production type, so both renewable
 columns come from a single query that is fetched once and split afterwards.
@@ -42,7 +44,8 @@ generation are not, and are deliberately not used here.
 
 ``read_data`` assigns column names positionally -- the first column after the
 index becomes ``Price`` and the rest become ``Exogenous 1..N`` -- so the header
-names written here are for human readers; the *order* is what matters.
+names written here are for human readers; the *column order* is what binds the
+data to the model.
 """
 
 import argparse
@@ -54,7 +57,7 @@ import pandas as pd
 from .areas import lookup
 from .client import TransparencyClient
 from .hourly import GridError, assert_epftoolbox_grid, to_local_hourly_grid
-from .parser import TransparencyError, parse_document, to_series
+from .parser import TransparencyError, parse_document, to_series, unit_label
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(THIS_DIR)
@@ -129,12 +132,43 @@ def _fetch_frame(client, params, value_tag, start_utc, end_utc, label, quiet=Fal
     return pd.concat(frames, ignore_index=True)
 
 
+def _price_unit(frame):
+    """Currency and measure unit of a price document, e.g. ``EUR/MWh``.
+
+    Read from the document rather than assumed: not every market publishes in
+    euros.
+    """
+    if frame.empty:
+        return None
+    currency = frame["currency_Unit.name"].dropna()
+    measure = frame["price_Measure_Unit.name"].dropna()
+    if currency.empty or measure.empty:
+        return None
+    return f"{currency.iloc[0]}/{unit_label(measure.iloc[0])}"
+
+
+def _quantity_unit(frame):
+    """Measure unit of a load or generation document, e.g. ``MW``."""
+    if frame.empty:
+        return None
+    measure = frame["quantity_Measure_Unit.name"].dropna()
+    return unit_label(measure.iloc[0]) if not measure.empty else None
+
+
+def _with_unit(name, unit):
+    return f"{name} ({unit})" if unit else name
+
+
 def _column_specs(area, exog):
     """Return (queries, columns) for the requested exogenous layout.
 
     ``queries`` maps a query key to (params, value_tag). ``columns`` is an
     ordered list of (column_name, query_key, aggregate, filter_fn), so several
     columns may share one query.
+
+    Column names describe the series. ``read_data`` renames columns positionally
+    to ``Price``/``Exogenous N`` when loading, so the *order* is what binds the
+    data to the model -- these names are for whoever opens the CSV.
     """
     queries = {
         "price": ({"documentType": "A44",
@@ -149,16 +183,18 @@ def _column_specs(area, exog):
     }
 
     columns = [
-        ("Price", "price", "first", _filter_day_ahead),
-        ("Exogenous 1", "load", "first", None),
+        ("Day-ahead price", "price", "first", _filter_day_ahead),
+        ("Day-ahead load forecast", "load", "first", None),
     ]
 
     if exog == "load-windsolar":
-        columns.append(("Exogenous 2", "renewables", "sum", None))
+        columns.append(("Day-ahead wind and solar forecast",
+                        "renewables", "sum", None))
     elif exog == "load-wind-solar":
-        columns.append(("Exogenous 2", "renewables", "sum",
+        columns.append(("Day-ahead wind forecast (on- and offshore)",
+                        "renewables", "sum",
                         _filter_psr(PSR_WIND_OFFSHORE, PSR_WIND_ONSHORE)))
-        columns.append(("Exogenous 3", "renewables", "sum",
+        columns.append(("Day-ahead solar forecast", "renewables", "sum",
                         _filter_psr(PSR_SOLAR)))
     else:
         raise ValueError(
@@ -212,8 +248,16 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
                 f"Check that this zone publishes that data item for the requested range."
             )
 
+    # Label each column with the unit the document actually declares.
+    units = {
+        "price": _price_unit(raw.get("price", pd.DataFrame())),
+        "load": _quantity_unit(raw.get("load", pd.DataFrame())),
+        "renewables": _quantity_unit(raw.get("renewables", pd.DataFrame())),
+    }
+
     columns = {}
     for label, key, aggregate, filter_fn in column_specs:
+        label = _with_unit(label, units.get(key))
         frame_for_column = raw[key]
         if filter_fn is not None:
             frame_for_column = filter_fn(frame_for_column)
