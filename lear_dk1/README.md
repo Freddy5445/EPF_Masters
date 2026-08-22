@@ -10,10 +10,13 @@ stop LEAR from running on this project's pinned stack are worked around here.
 
 Build the dataset first (needs an ENTSO-E token — see `entsoe_tp/README.md`):
 
-```bash
-python -m entsoe_tp.build_dataset --zone DK1 --start 2015-01-05 \
-    --end 2025-09-30 --exog load-wind-solar
 ```
+python -m entsoe_tp.build_dataset --zone DK1 --start 2015-01-05 --end 2025-09-30 --exog load-wind-solar
+```
+
+(Commands are written on one line throughout: this project is developed from
+PowerShell, where `\` is not a line continuation and silently truncates the
+command.)
 
 Validate the pipeline on ten days before committing to a multi-hour run:
 

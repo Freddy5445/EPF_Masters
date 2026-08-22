@@ -1,10 +1,11 @@
 """
 Run the LEAR ensemble backtest on a bidding-zone dataset.
 
-Build the dataset first (needs an ENTSO-E token; see entsoe_tp/README.md):
+Build the dataset first (needs an ENTSO-E token; see entsoe_tp/README.md).
+Commands are given on one line: this project is developed from PowerShell,
+where a trailing ``\`` is not a line continuation and truncates the command.
 
-    python -m entsoe_tp.build_dataset --zone DK1 --start 2015-01-05 \
-        --end 2025-09-30 --exog load-wind-solar
+    python -m entsoe_tp.build_dataset --zone DK1 --start 2015-01-05 --end 2025-09-30 --exog load-wind-solar
 
 Then smoke-test the pipeline on a few days with one window before committing to
 the full run:
