@@ -223,6 +223,13 @@ def run_window(df_train, df_test, calibration_window, run_dir, run_id,
         summary["mae"] = float(MAE(forecasts[filled].values.astype(float),
                                    real_values[filled].values.astype(float)))
 
+    # Features with no variation in the calibration window -- typically the
+    # solar forecast at night hours, which is exactly zero year-round. They
+    # carry no information and LASSO gives them zero weight; worth recording
+    # because they reduce the effective feature count.
+    if completed:
+        summary["constant_features"] = int(model.constant_features_)
+
     return forecasts, summary
 
 

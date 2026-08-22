@@ -77,6 +77,70 @@ class TestCompatSubclass(unittest.TestCase):
         self.assertIsNot(LEARCompat.predict, upstream.predict)
 
 
+class TestZeroMadScaling(unittest.TestCase):
+    """A feature that never varies must not poison the scaler.
+
+    LEAR's asinh-median scaler divides by the median absolute deviation. For a
+    constant feature MAD is 0 and ``data - median`` is 0, so upstream computes
+    0/0 and fills the column with NaN -- which LassoLarsIC then rejects with a
+    message about imputers that has nothing to do with the cause.
+
+    This is not hypothetical: LEAR builds one feature per (hour, lag), so a
+    solar forecast that is exactly zero every night yields constant columns in
+    any real dataset containing solar.
+    """
+
+    def test_upstream_scaler_produces_nan_for_a_constant_column(self):
+        """Documents the upstream behaviour being worked around."""
+        from epftoolbox.data import scaling
+
+        X = np.random.default_rng(0).normal(50, 10, (200, 4))
+        X[:, 2] = 0.0
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            [scaled], _ = scaling([X.copy()], "Invariant")
+
+        self.assertTrue(np.isnan(scaled[:, 2]).all())
+        self.assertFalse(np.isnan(np.delete(scaled, 2, axis=1)).any())
+
+    def test_guarded_scaler_maps_a_constant_column_to_zero(self):
+        from lear_dk1.compat import _fit_invariant_scaler
+
+        X = np.random.default_rng(0).normal(50, 10, (200, 4))
+        X[:, 2] = 7.5
+
+        scaler, scaled, n_constant = _fit_invariant_scaler(X)
+
+        self.assertEqual(n_constant, 1)
+        self.assertFalse(np.isnan(scaled).any())
+        # No variation means no information; the column becomes all zeros.
+        np.testing.assert_allclose(scaled[:, 2], 0.0, atol=1e-12)
+
+    def test_guarded_scaler_inverts_a_constant_column(self):
+        from lear_dk1.compat import _fit_invariant_scaler
+
+        X = np.random.default_rng(0).normal(50, 10, (200, 3))
+        X[:, 1] = 7.5
+
+        scaler, scaled, _ = _fit_invariant_scaler(X)
+        np.testing.assert_allclose(scaler.inverse_transform(scaled), X, atol=1e-8)
+
+    def test_varying_columns_are_scaled_identically_to_upstream(self):
+        """The guard must not change results where MAD is non-zero."""
+        from epftoolbox.data import scaling
+        from lear_dk1.compat import _fit_invariant_scaler
+
+        X = np.random.default_rng(1).normal(50, 10, (200, 4))
+
+        [upstream], _ = scaling([X.copy()], "Invariant")
+        _, guarded, n_constant = _fit_invariant_scaler(X.copy())
+
+        self.assertEqual(n_constant, 0)
+        np.testing.assert_allclose(guarded, upstream, atol=1e-12)
+
+
 class TestCheckpointing(unittest.TestCase):
 
     def test_missing_checkpoint_returns_none(self):
