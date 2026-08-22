@@ -27,7 +27,8 @@ class GridError(ValueError):
     """Raised when a series cannot be coerced to the required hourly grid."""
 
 
-def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3):
+def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3,
+                         allow_gaps=False):
     """Convert a UTC-indexed series to a naive local hourly grid.
 
     ``start_date`` and ``end_date`` are dates (inclusive); the result spans
@@ -37,6 +38,20 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3):
     Fall-back duplicates are averaged, the spring-forward hour is interpolated,
     and any remaining gap up to ``max_gap`` hours is interpolated with a warning.
     A longer gap raises :class:`GridError` rather than quietly inventing data.
+
+    With ``allow_gaps=True`` **nothing is interpolated at all** and ``max_gap`` is
+    ignored: every hour the platform did not publish is left as NaN, including
+    the spring-forward hour. This turns the function into a pure acquisition
+    step -- what came back, on the hourly grid, and nothing invented -- so that
+    how to treat missing data stays a separate, later decision.
+
+    The one transformation still applied is fall-back averaging: a naive local
+    grid has a single 02:00 slot on the autumn DST day, so the two observations
+    that share it are averaged. That aggregates real values rather than
+    inventing any, and cannot be avoided while keeping 24 rows per day.
+
+    The result violates the epftoolbox no-NaN invariant, so it cannot be fed to
+    a model as-is.
     """
     if series_utc.empty:
         raise GridError("No data returned for the requested range")
@@ -55,6 +70,10 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3):
     )
 
     aligned = naive.reindex(grid)
+
+    if allow_gaps:
+        # Pure acquisition: exactly what was published, on the grid, nothing filled.
+        return aligned
 
     # Spring-forward hours do not exist in local time, so no amount of data would
     # fill them; they are expected NaNs. Anything else is a real gap.
@@ -85,6 +104,7 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3):
     return filled
 
 
+
 def _check_gap_lengths(gap_index, max_gap):
     """Raise if any run of consecutive missing hours exceeds ``max_gap``."""
     run_start = previous = gap_index[0]
@@ -103,7 +123,7 @@ def _check_gap_lengths(gap_index, max_gap):
         previous = timestamp
 
 
-def assert_epftoolbox_grid(frame):
+def assert_epftoolbox_grid(frame, allow_nan=False):
     """Validate the invariant ``read_data`` and the models silently assume.
 
     Raises :class:`GridError` on violation. Failing here is far cheaper than the
@@ -133,6 +153,8 @@ def assert_epftoolbox_grid(frame):
             f"Range must start at 00:00 and end at 23:00, got {index[0]} to {index[-1]}"
         )
 
-    if frame.isna().any().any():
+    # The shape invariants above always hold. NaN is the one thing a caller may
+    # deliberately accept, to inspect partial data before deciding what to do.
+    if not allow_nan and frame.isna().any().any():
         counts = frame.isna().sum()
         raise GridError(f"Frame still contains NaN values: {counts.to_dict()}")
