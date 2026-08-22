@@ -122,6 +122,22 @@ the DNN modules, which do `import tensorflow.keras as kr` — a layout Keras 3 n
 longer provides. `compat.load_lear_class()` loads `_lear.py` directly from its
 path so the package `__init__` never runs.
 
+**A constant feature makes the scaler emit NaN.** LEAR's asinh-median
+("Invariant") scaler divides by the median absolute deviation. For a feature
+that never varies, MAD is 0 and `data - median` is 0, so upstream computes
+`0 / 0` and fills the column with NaN — which `LassoLarsIC` then rejects with a
+message recommending imputer pipelines, pointing away from the real cause.
+
+This is not hypothetical. LEAR builds one feature per (hour, lag), and a solar
+generation forecast is **exactly zero every night, year-round**. A DK1 dataset
+with solar as a separate exogenous input therefore has 39 constant columns —
+13 night hours × 3 lags (D, D−1, D−7) — and upstream LEAR cannot be fitted on it
+at all. `LEARCompat.recalibrate` substitutes 1 for a zero MAD, mapping such a
+column to all zeros: a feature with no variation carries no information, LASSO
+gives it a zero coefficient, and the inverse transform still recovers the
+constant. Columns that do vary are scaled bit-identically to upstream. The count
+is reported per window as `constant_features` in `run_metadata.json`.
+
 **Short calibration windows are impossible.** `LassoLarsIC` refuses to fit when
 samples < features, and LEAR has `96 + 7 + 72·n_exogenous` features:
 

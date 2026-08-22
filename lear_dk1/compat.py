@@ -32,6 +32,9 @@ import os
 import sys
 
 import numpy as np
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.linear_model import Lasso, LassoLarsIC
+from sklearn.utils._testing import ignore_warnings
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(THIS_DIR)
@@ -73,13 +76,68 @@ def load_lear_class():
 _LEAR = load_lear_class()
 
 
-class LEARCompat(_LEAR):
-    """LEAR with the NumPy 2 scalar-assignment break fixed.
+def _fit_invariant_scaler(data):
+    """Fit the asinh-median scaler, guarding against a zero MAD.
 
-    Only :meth:`predict` differs from upstream. Recalibration, the asinh-median
-    ("Invariant") scaling and the LASSO/LARS hyperparameter search are inherited
-    untouched, so forecasts match what upstream would produce on NumPy 1.x.
+    The scaler divides by the median absolute deviation. A feature that never
+    varies has ``mad == 0`` and ``data - median == 0``, so upstream computes
+    ``0 / 0`` and fills the whole column with NaN, which ``LassoLarsIC`` then
+    rejects with a message about imputers that has nothing to do with the cause.
+
+    This is not a hypothetical: LEAR builds one feature per (hour, lag), so a
+    solar generation forecast -- exactly zero at night, every night -- produces
+    several genuinely constant columns in any real dataset that includes solar.
+
+    Substituting 1 for a zero MAD maps such a column to all-zeros, which is the
+    sensible reading: a feature with no variation carries no information, and
+    LASSO gives it a zero coefficient. The inverse transform still recovers the
+    constant, since ``0 * 1 + median == median``.
+
+    Returns ``(scaler, transformed, n_constant)``.
     """
+    from epftoolbox.data import DataScaler
+
+    scaler = DataScaler("Invariant")
+    scaler.scaler.fit(data)
+
+    constant = scaler.scaler.mad == 0
+    n_constant = int(constant.sum())
+    if n_constant:
+        scaler.scaler.mad = np.where(constant, 1.0, scaler.scaler.mad)
+
+    return scaler, scaler.transform(data), n_constant
+
+
+class LEARCompat(_LEAR):
+    """LEAR with the NumPy 2 and zero-MAD breaks fixed.
+
+    Two methods differ from upstream; the LASSO/LARS estimation itself, the
+    feature construction and the recalibration protocol are unchanged, so
+    forecasts match what upstream would produce on a stack where it ran.
+
+    ``constant_features_`` records how many input features had no variation in
+    the most recent calibration window.
+    """
+
+    constant_features_ = 0
+
+    @ignore_warnings(category=ConvergenceWarning)
+    def recalibrate(self, Xtrain, Ytrain):
+        # Same as upstream, except the two scalers guard against a zero MAD.
+        self.scalerY, Ytrain, _ = _fit_invariant_scaler(Ytrain)
+        self.scalerX, Xtrain_no_dummies, self.constant_features_ = \
+            _fit_invariant_scaler(Xtrain[:, :-7])
+        Xtrain[:, :-7] = Xtrain_no_dummies
+
+        self.models = {}
+        for h in range(24):
+            # Estimate lambda with LARS, then refit with standard LASSO, as
+            # upstream does.
+            param = LassoLarsIC(criterion="aic", max_iter=2500) \
+                .fit(Xtrain, Ytrain[:, h]).alpha_
+            model = Lasso(max_iter=2500, alpha=param)
+            model.fit(Xtrain, Ytrain[:, h])
+            self.models[h] = model
 
     def predict(self, X):
         Yp = np.zeros(24)
