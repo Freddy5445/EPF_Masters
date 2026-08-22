@@ -39,11 +39,19 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3,
     and any remaining gap up to ``max_gap`` hours is interpolated with a warning.
     A longer gap raises :class:`GridError` rather than quietly inventing data.
 
-    With ``allow_gaps=True`` a long gap is left as NaN instead of raising, so the
-    caller gets the data that does exist and can decide what to do about the
-    rest. Runs up to ``max_gap`` are still interpolated; pass ``max_gap=0`` to
-    interpolate nothing. Note the result then violates the epftoolbox
-    no-NaN invariant, so it cannot be fed to a model as-is.
+    With ``allow_gaps=True`` **nothing is interpolated at all** and ``max_gap`` is
+    ignored: every hour the platform did not publish is left as NaN, including
+    the spring-forward hour. This turns the function into a pure acquisition
+    step -- what came back, on the hourly grid, and nothing invented -- so that
+    how to treat missing data stays a separate, later decision.
+
+    The one transformation still applied is fall-back averaging: a naive local
+    grid has a single 02:00 slot on the autumn DST day, so the two observations
+    that share it are averaged. That aggregates real values rather than
+    inventing any, and cannot be avoided while keeping 24 rows per day.
+
+    The result violates the epftoolbox no-NaN invariant, so it cannot be fed to
+    a model as-is.
     """
     if series_utc.empty:
         raise GridError("No data returned for the requested range")
@@ -63,6 +71,10 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3,
 
     aligned = naive.reindex(grid)
 
+    if allow_gaps:
+        # Pure acquisition: exactly what was published, on the grid, nothing filled.
+        return aligned
+
     # Spring-forward hours do not exist in local time, so no amount of data would
     # fill them; they are expected NaNs. Anything else is a real gap.
     localized = grid.tz_localize(tz, ambiguous=True, nonexistent="NaT")
@@ -71,26 +83,17 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3,
     missing = aligned.index[aligned.isna()]
     real_gaps = missing.difference(dst_missing)
 
-    keep_missing = pd.DatetimeIndex([])
     if len(real_gaps):
-        if allow_gaps:
-            # Interpolating across a long gap invents data, so those hours stay
-            # NaN; only runs within max_gap are filled.
-            keep_missing = _runs_longer_than(real_gaps, max_gap)
-        else:
-            _check_gap_lengths(real_gaps, max_gap)
+        _check_gap_lengths(real_gaps, max_gap)
         warnings.warn(
-            f"Interpolating {len(real_gaps) - len(keep_missing)} missing hour(s) "
-            f"not explained by DST, first at {real_gaps[0]}, last at {real_gaps[-1]}",
+            f"Interpolating {len(real_gaps)} missing hour(s) not explained by DST, "
+            f"first at {real_gaps[0]}, last at {real_gaps[-1]}",
             stacklevel=2,
         )
 
     filled = aligned.interpolate(method="linear", limit_area="inside")
 
-    if len(keep_missing):
-        filled.loc[keep_missing] = float("nan")
-
-    if filled.isna().any() and not allow_gaps:
+    if filled.isna().any():
         edge = filled.index[filled.isna()]
         raise GridError(
             f"{len(edge)} hour(s) at the edges of the range have no data and cannot "
@@ -100,27 +103,6 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3,
 
     return filled
 
-
-def _runs_longer_than(gap_index, max_gap):
-    """Hours belonging to a run of consecutive missing hours longer than ``max_gap``."""
-    if not len(gap_index):
-        return pd.DatetimeIndex([])
-
-    keep = []
-    run = [gap_index[0]]
-
-    for timestamp in gap_index[1:]:
-        if timestamp - run[-1] == pd.Timedelta(hours=1):
-            run.append(timestamp)
-        else:
-            if len(run) > max_gap:
-                keep.extend(run)
-            run = [timestamp]
-
-    if len(run) > max_gap:
-        keep.extend(run)
-
-    return pd.DatetimeIndex(keep)
 
 
 def _check_gap_lengths(gap_index, max_gap):

@@ -256,10 +256,10 @@ def main(argv=None):
                              "or 'load-wind-solar' (3 columns, renewables split by "
                              "production type)")
     parser.add_argument("--allow-gaps", action="store_true",
-                        help="Write the dataset even where data is missing, leaving "
-                             "NaN instead of aborting. Runs up to --max-gap are "
-                             "still interpolated; use --max-gap 0 to interpolate "
-                             "nothing. The result cannot be fed to a model as-is.")
+                        help="Acquisition only: write exactly what the platform "
+                             "published, leaving every missing hour as NaN. "
+                             "Interpolates nothing and ignores --max-gap. The "
+                             "result cannot be fed to a model as-is.")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
     args = parser.parse_args(argv)
 
