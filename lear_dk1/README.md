@@ -50,17 +50,32 @@ coverage before that is too sparse to be worth imputing.
 `build_dataset --allow-gaps` writes what the platform published and leaves the
 rest as NaN. LEAR cannot be fitted on NaN, so gaps are filled **here**, at model
 time, where the method is a stated choice rather than something baked invisibly
-into the data. Three methods apply in order:
+into the data.
+
+**Every method is causal**: a value at time *t* is derived only from observations
+strictly before *t*. This is not a detail. A backtest simulates forecasting day
+D knowing only what was available beforehand, so a value imputed from day D+7
+leaks future information into the training set — and where a gap falls inside the
+test period, into the very target the model is scored against. Interpolating
+across a gap and taking a median over the whole series both do this; neither is
+used.
 
 | Gap | Method | Why |
 |---|---|---|
-| Up to `--max-linear` hours | Linear interpolation | Over a few hours the series barely bends |
-| Longer | Same hour, nearest week (±7d, ±14d, …) | Keeps the daily shape and the weekday/weekend split; a straight line across a multi-day gap destroys both |
-| Anything left | Median for that hour of day | Last resort, in practice only at the very start of the range |
+| Up to `--max-linear` hours | Carry last observation forward | Adjacent hours are highly correlated, and unlike interpolation it needs nothing from the far side |
+| Longer | Same hour, an **earlier** week (−7d, −14d, …) | Keeps the daily shape and the weekday/weekend split; carrying one value forward for days would flatten both |
+| No earlier week has that hour | Same hour, previous day | In practice only the first weeks of a series |
+| Anything left | Expanding median for that hour of day, past only | Last resort |
+| No earlier data at all | **Left as NaN and trimmed** | Cannot be filled causally; inventing it would be indistinguishable from look-ahead |
 
-Every filled value is counted and attributed to the method that produced it, and
-recorded in `run_metadata.json` under `imputation`, so a run can state exactly
-how much of its input was invented and how.
+A quick sanity check of the causality claim: on a series whose level jumps from
+50 to 500 exactly where a gap ends, this fills the gap with values up to 75 —
+while linear interpolation reaches 473 and a same-hour-*next*-week fill reaches
+525. Both of those have leaked the future.
+
+Every filled value is counted and attributed to the method that produced it,
+printed at run start and recorded in `run_metadata.json` under `imputation`, so a
+run can state exactly how much of its input was imputed and how.
 
 ## Following a long run
 

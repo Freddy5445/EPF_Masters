@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 
 from .compat import LEARCompat, PROJECT_ROOT, minimum_calibration_window, n_features
-from .impute import format_report, impute_frame
+from .impute import first_complete_day, format_report, impute_frame
 
 # read_data lives in a TensorFlow-free subpackage, so this import is safe.
 if os.path.join(PROJECT_ROOT, "epftoolbox") not in sys.path:
@@ -261,11 +261,29 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
             )
 
     imputation = None
+    trimmed_no_history = 0
     if impute and combined.isna().any().any():
-        combined, imputation = impute_frame(combined, max_linear=max_linear)
+        combined, imputation = impute_frame(combined, max_ffill=max_linear)
         if not quiet:
-            print("Imputed missing values:")
+            print("Imputed missing values (past observations only):")
             print(format_report(imputation, len(combined)))
+
+        # Causal imputation cannot fill hours with no history, so those are
+        # dropped rather than invented.
+        if combined.isna().any().any():
+            usable_from = first_complete_day(combined)
+            trimmed_no_history = int((combined.index < usable_from).sum())
+            combined = combined.loc[usable_from:]
+            if not quiet:
+                print(f"  Trimmed {trimmed_no_history:,} leading hour(s) with no "
+                      f"history to impute from; data now starts {usable_from}")
+            if combined.empty or usable_from >= test_start:
+                raise ValueError(
+                    f"After dropping unfillable leading hours the data starts at "
+                    f"{usable_from}, at or after the test start {test_start}. "
+                    f"Raise --data-start."
+                )
+        if not quiet:
             print()
     elif combined.isna().any().any():
         counts = combined.isna().sum()
@@ -308,7 +326,9 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
         # the result honestly.
         "imputation": {
             "applied": imputation is not None,
-            "max_linear_hours": max_linear,
+            "causal": True,
+            "max_forward_fill_hours": max_linear,
+            "trimmed_leading_hours_no_history": trimmed_no_history,
             "columns": imputation,
         },
         "environment": environment_metadata(),
