@@ -152,6 +152,77 @@ class TestReadDataDateHandling(unittest.TestCase):
             self.assertLess(df_train.index[-1], begin)
 
 
+class TestImputation(unittest.TestCase):
+    """Gaps are filled at model time, so the method is a stated choice."""
+
+    def periodic_frame(self, days=90):
+        """A series with a strong daily and weekly shape, so a bad fill shows."""
+        idx = pd.date_range("2015-01-07", periods=days * 24, freq="h")
+        hour, dow = idx.hour.values, idx.dayofweek.values
+        base = 50 + 25 * np.sin(2 * np.pi * (hour - 8) / 24) - 12 * (dow >= 5)
+        return pd.DataFrame({"Price": base, "Load": 3000 + base * 10}, index=idx)
+
+    def test_everything_is_filled(self):
+        from lear_dk1.impute import impute_frame
+
+        truth = self.periodic_frame()
+        gappy = truth.copy()
+        gappy.iloc[100:102] = np.nan
+        gappy.iloc[1000:1072] = np.nan
+
+        filled, report = impute_frame(gappy)
+        self.assertFalse(filled.isna().any().any())
+        self.assertEqual(report["Price"]["unfilled"], 0)
+
+    def test_short_gaps_use_linear_and_long_gaps_do_not(self):
+        from lear_dk1.impute import impute_frame
+
+        gappy = self.periodic_frame()
+        gappy.iloc[100:102] = np.nan     # 2h  -> linear
+        gappy.iloc[1000:1072] = np.nan   # 72h -> same hour, other week
+
+        _, report = impute_frame(gappy, max_linear=3)
+        self.assertEqual(report["Price"]["linear"], 2)
+        self.assertEqual(report["Price"]["same_hour_other_week"], 72)
+
+    def test_long_gap_preserves_the_daily_shape(self):
+        """The point of the weekly fill: a straight line would flatten the cycle."""
+        from lear_dk1.impute import impute_frame
+
+        truth = self.periodic_frame()
+        gappy = truth.copy()
+        gappy.iloc[1000:1072] = np.nan
+
+        filled, _ = impute_frame(gappy)
+        weekly_error = (filled["Price"].iloc[1000:1072]
+                        - truth["Price"].iloc[1000:1072]).abs().max()
+        linear_error = (gappy["Price"].interpolate("linear").iloc[1000:1072]
+                        - truth["Price"].iloc[1000:1072]).abs().max()
+
+        self.assertLess(weekly_error, 1.0)
+        self.assertGreater(linear_error, 20.0)
+
+    def test_leading_gap_is_filled_from_a_later_week(self):
+        from lear_dk1.impute import impute_frame
+
+        truth = self.periodic_frame()
+        gappy = truth.copy()
+        gappy.iloc[0:5] = np.nan
+
+        filled, report = impute_frame(gappy)
+        self.assertFalse(filled.isna().any().any())
+        # limit_area="inside" cannot touch a leading gap, so linear fills none.
+        self.assertEqual(report["Price"]["linear"], 0)
+
+    def test_complete_column_is_left_alone(self):
+        from lear_dk1.impute import impute_frame
+
+        truth = self.periodic_frame(days=30)
+        filled, report = impute_frame(truth)
+        pd.testing.assert_frame_equal(filled, truth)
+        self.assertEqual(report["Price"]["missing"], 0)
+
+
 class TestFormatting(unittest.TestCase):
 
     def test_duration_formatting(self):

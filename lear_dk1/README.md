@@ -26,17 +26,41 @@ python run_lear_dk1.py --smoke
 
 Then the full ensemble:
 
-```bash
-python run_lear_dk1.py --begin-test 2023-10-03 --end-test 2025-09-30
+```
+python run_lear_dk1.py
 ```
 
 | Flag | Meaning |
 |---|---|
 | `--dataset` | Dataset name; reads `<datasets-dir>/<dataset>.csv` (default `DK1`) |
-| `--begin-test`, `--end-test` | Inclusive test days, `YYYY-MM-DD` |
+| `--data-start` | Ignore data before this day (default `2015-01-07`) |
+| `--begin-test`, `--end-test` | Inclusive test days (default `2023-04-11` to `2025-04-07`) |
 | `--windows` | Comma-separated calibration windows in days (default `364,728,1092,1456`) |
+| `--max-linear` | Longest gap filled by interpolation, in hours (default 3) |
+| `--no-impute` | Fail on missing values instead of filling them |
 | `--run-name` | Run directory name — **reuse it to resume** |
 | `--smoke` | Ten days on the smallest window, into a separate directory |
+
+The end date defaults to 2025-04-07 because DK1 day-ahead moved to 15-minute
+market time units on 2025-04-08, and the start to 2015-01-07 because ENTSO-E
+coverage before that is too sparse to be worth imputing.
+
+## Missing values
+
+`build_dataset --allow-gaps` writes what the platform published and leaves the
+rest as NaN. LEAR cannot be fitted on NaN, so gaps are filled **here**, at model
+time, where the method is a stated choice rather than something baked invisibly
+into the data. Three methods apply in order:
+
+| Gap | Method | Why |
+|---|---|---|
+| Up to `--max-linear` hours | Linear interpolation | Over a few hours the series barely bends |
+| Longer | Same hour, nearest week (±7d, ±14d, …) | Keeps the daily shape and the weekday/weekend split; a straight line across a multi-day gap destroys both |
+| Anything left | Median for that hour of day | Last resort, in practice only at the very start of the range |
+
+Every filled value is counted and attributed to the method that produced it, and
+recorded in `run_metadata.json` under `imputation`, so a run can state exactly
+how much of its input was invented and how.
 
 ## Following a long run
 
