@@ -46,16 +46,36 @@ no registration step is needed.
 | `--zone` | Bidding zone code — `DK1`, `DK2`, `SE1`–`SE4`, `NO1`–`NO5`, `FI`, `DE_LU`, `FR`, `BE`, `NL`, … (see `areas.py`) |
 | `--start`, `--end` | Inclusive local calendar days, `YYYY-MM-DD` |
 | `--out` | Output path (default `datasets/<ZONE>.csv`) |
+| `--exog` | Exogenous layout: `load-windsolar` (2 columns, default) or `load-wind-solar` (3 columns) |
 | `--no-cache` | Re-download instead of reusing cached raw XML |
 | `--max-gap` | Longest run of missing hours to interpolate (default 3) |
 
 ## What it fetches
+
+With `--exog load-windsolar` (the default):
 
 | Output column | Data item | Query |
 |---|---|---|
 | `Price` | Day-ahead prices [12.1.D] | `documentType=A44` |
 | `Exogenous 1` | Day-ahead total load forecast [6.1.B] | `A65` + `processType=A01` |
 | `Exogenous 2` | Day-ahead wind & solar forecast [14.1.D] | `A69` + `processType=A01` |
+
+With `--exog load-wind-solar`, the renewables are split by production type:
+
+| Output column | Data item | Query |
+|---|---|---|
+| `Price` | Day-ahead prices [12.1.D] | `documentType=A44` |
+| `Exogenous 1` | Day-ahead total load forecast [6.1.B] | `A65` + `processType=A01` |
+| `Exogenous 2` | Day-ahead wind forecast, on- + offshore | `A69`, `psrType` B18 + B19 |
+| `Exogenous 3` | Day-ahead solar forecast | `A69`, `psrType` B16 |
+
+Wind and solar arrive in the *same* A69 document as separate `TimeSeries`, so
+both columns come from one query that is fetched once and split afterwards. If a
+zone does not publish a requested production type the build fails loudly rather
+than emitting a column of zeros.
+
+Note the exogenous count drives LEAR's feature count (`96 + 7 + 72·n`), which in
+turn sets the shortest usable calibration window — see `lear_dk1/README.md`.
 
 Both exogenous series are *forecasts* published day-ahead, so they are genuinely
 available when a day-ahead price forecast has to be made. Realised load and generation
