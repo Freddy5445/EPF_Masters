@@ -13,3 +13,6 @@ __pycache__/
 
 # csv files
 *.csv
+
+# Claude Code local settings
+.claude/settings.local.json
