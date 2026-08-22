@@ -15,7 +15,12 @@ the full run:
 Then the real thing (hours -- it checkpoints, so it can be interrupted and
 resumed with the same command):
 
-    python run_lear_dk1.py --begin-test 2023-10-03 --end-test 2025-09-30
+    python run_lear_dk1.py
+
+Missing values are imputed here rather than at download time, so that how gaps
+are filled stays a stated modelling choice: short gaps linearly, longer ones
+from the same hour in the nearest week. Every run records how much of its input
+was imputed, and by which method, in run_metadata.json.
 
 Per-day progress, timings and an ETA are printed as it goes, and every run
 writes forecasts, per-day timings and a JSON manifest under experiments/.
@@ -40,6 +45,18 @@ DEFAULT_OUT = os.path.join(THIS_DIR, "experiments")
 # inputs and 319 with three.
 DEFAULT_WINDOWS = (364, 728, 1092, 1456)
 
+# ENTSO-E publishes DK1 too sparsely before this to be worth imputing: the
+# Transparency Platform went live on 2015-01-05 and took a couple of days to
+# produce complete days.
+DEFAULT_DATA_START = "2015-01-07"
+
+# DK1 day-ahead moved to 15-minute market time units on 2025-04-08, so the
+# hourly series the epftoolbox models require ends the day before.
+DEFAULT_END_TEST = "2025-04-07"
+
+# 728 days (two 364-day "years", the epftoolbox convention) ending there.
+DEFAULT_BEGIN_TEST = "2023-04-11"
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -49,11 +66,24 @@ def main(argv=None):
                              "(default: DK1)")
     parser.add_argument("--datasets-dir", default=DEFAULT_DATASETS,
                         help="Directory holding the dataset CSV")
-    parser.add_argument("--begin-test", default="2023-10-03",
-                        help="First test day, YYYY-MM-DD (default: 2023-10-03)")
-    parser.add_argument("--end-test", default="2025-09-30",
-                        help="Last test day inclusive, YYYY-MM-DD "
-                             "(default: 2025-09-30)")
+    parser.add_argument("--data-start", default=DEFAULT_DATA_START,
+                        help=f"Ignore data before this day, YYYY-MM-DD "
+                             f"(default: {DEFAULT_DATA_START}). ENTSO-E coverage "
+                             f"before this is too sparse to be worth imputing.")
+    parser.add_argument("--begin-test", default=DEFAULT_BEGIN_TEST,
+                        help=f"First test day, YYYY-MM-DD "
+                             f"(default: {DEFAULT_BEGIN_TEST})")
+    parser.add_argument("--end-test", default=DEFAULT_END_TEST,
+                        help=f"Last test day inclusive, YYYY-MM-DD "
+                             f"(default: {DEFAULT_END_TEST}, where DK1 hourly "
+                             f"day-ahead data ends)")
+    parser.add_argument("--no-impute", action="store_true",
+                        help="Fail instead of filling missing values. LEAR cannot "
+                             "be fitted on NaN, so this only reports the problem.")
+    parser.add_argument("--max-linear", type=int, default=3,
+                        help="Longest gap to fill by linear interpolation, in "
+                             "hours (default 3). Longer gaps use the same hour "
+                             "from the nearest available week.")
     parser.add_argument("--windows", default=",".join(str(w) for w in DEFAULT_WINDOWS),
                         help="Comma-separated calibration windows in days "
                              f"(default: {','.join(str(w) for w in DEFAULT_WINDOWS)})")
@@ -118,21 +148,33 @@ def main(argv=None):
             calibration_windows=windows,
             out_dir=args.out_dir,
             run_name=run_name,
+            data_start=pd.Timestamp(args.data_start) if args.data_start else None,
+            impute=not args.no_impute,
+            max_linear=args.max_linear,
             quiet=args.quiet,
         )
     except (IOError, OSError) as exc:
         print(f"error: could not read the dataset -- {exc}", file=sys.stderr)
         print(f"Build it first with:\n  python -m entsoe_tp.build_dataset "
-              f"--zone {args.dataset} --start 2015-01-05 --end 2025-09-30 "
-              f"--exog load-wind-solar", file=sys.stderr)
+              f"--zone {args.dataset} --start 2015-01-05 --end {DEFAULT_END_TEST} "
+              f"--exog load-wind-solar --allow-gaps", file=sys.stderr)
         return 1
     except ValueError as exc:
         message = exc.args[0] if exc.args else str(exc)
         print(f"error: {message}", file=sys.stderr)
-        # The most common cause is a window below the LassoLarsIC floor.
-        print(f"\nMinimum window is {minimum_calibration_window(2)} days for 2 "
-              f"exogenous inputs, {minimum_calibration_window(3)} for 3.",
-              file=sys.stderr)
+
+        # Add a hint only when it fits the failure. Printing the calibration
+        # window floor after, say, a NaN error sends the reader the wrong way.
+        lowered = message.lower()
+        if "contains nan" in lowered or "missing value" in lowered:
+            print(f"\nThe dataset has gaps that were not filled. Imputation runs "
+                  f"by default; if --no-impute was passed, drop it. Otherwise the "
+                  f"installed code may predate imputation being added -- check "
+                  f"that lear_dk1/impute.py exists and pull if not.", file=sys.stderr)
+        elif "calibration_window" in lowered:
+            print(f"\nMinimum window is {minimum_calibration_window(2)} days for 2 "
+                  f"exogenous inputs, {minimum_calibration_window(3)} for 3.",
+                  file=sys.stderr)
         return 1
 
     return 0

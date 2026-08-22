@@ -152,6 +152,110 @@ class TestReadDataDateHandling(unittest.TestCase):
             self.assertLess(df_train.index[-1], begin)
 
 
+class TestImputation(unittest.TestCase):
+    """Imputation must be causal: no filled value may depend on the future.
+
+    A backtest simulates forecasting day D knowing only what came before, so a
+    value imputed from day D+7 leaks future information into training -- and,
+    where the gap is inside the test period, into the target being scored.
+    """
+
+    def periodic_frame(self, days=90):
+        """A series with a strong daily and weekly shape, so a bad fill shows."""
+        idx = pd.date_range("2015-01-07", periods=days * 24, freq="h")
+        hour, dow = idx.hour.values, idx.dayofweek.values
+        base = 50 + 25 * np.sin(2 * np.pi * (hour - 8) / 24) - 12 * (dow >= 5)
+        return pd.DataFrame({"Price": base, "Load": 3000 + base * 10}, index=idx)
+
+    def step_frame(self, jump_at=1080, days=80):
+        """Level jumps sharply at ``jump_at``; any look-ahead leaks the new level."""
+        idx = pd.date_range("2015-01-07", periods=days * 24, freq="h")
+        daily = 25 * np.sin(2 * np.pi * (idx.hour.values - 8) / 24)
+        level = np.where(np.arange(len(idx)) < jump_at, 50.0, 500.0)
+        return pd.DataFrame({"Price": level + daily}, index=idx)
+
+    def test_no_lookahead_across_a_long_gap(self):
+        """The decisive test: a gap ending exactly where the level jumps."""
+        from lear_dk1.impute import impute_frame
+
+        gappy = self.step_frame(jump_at=1080)
+        gappy.iloc[1000:1080] = np.nan
+
+        filled, _ = impute_frame(gappy, max_ffill=3)
+        imputed = filled["Price"].iloc[1000:1080]
+
+        # Pre-gap level is 50 +/- 25; the post-gap level of 500 must not appear.
+        self.assertLess(imputed.max(), 100)
+
+        # Confirm the test would actually catch a leak.
+        leaky = gappy["Price"].interpolate("linear").iloc[1000:1080]
+        self.assertGreater(leaky.max(), 100)
+
+    def test_no_lookahead_for_short_gaps(self):
+        from lear_dk1.impute import impute_frame
+
+        gappy = self.step_frame(jump_at=1002)
+        gappy.iloc[1000:1002] = np.nan
+
+        filled, _ = impute_frame(gappy, max_ffill=3)
+        self.assertLess(filled["Price"].iloc[1000:1002].max(), 100)
+
+    def test_short_gaps_carry_forward_and_long_gaps_use_an_earlier_week(self):
+        from lear_dk1.impute import impute_frame
+
+        gappy = self.periodic_frame()
+        gappy.iloc[100:102] = np.nan     # 2h  -> carry forward
+        gappy.iloc[1000:1072] = np.nan   # 72h -> same hour, earlier week
+
+        _, report = impute_frame(gappy, max_ffill=3)
+        self.assertEqual(report["Price"]["forward_fill"], 2)
+        self.assertEqual(report["Price"]["same_hour_earlier_week"], 72)
+
+    def test_long_gap_preserves_the_daily_shape(self):
+        """Carrying one value forward for days would flatten the cycle."""
+        from lear_dk1.impute import impute_frame
+
+        truth = self.periodic_frame()
+        gappy = truth.copy()
+        gappy.iloc[1000:1072] = np.nan
+
+        filled, _ = impute_frame(gappy)
+        error = (filled["Price"].iloc[1000:1072]
+                 - truth["Price"].iloc[1000:1072]).abs().max()
+        self.assertLess(error, 1.0)
+
+    def test_hours_with_no_history_are_left_unfilled(self):
+        """They cannot be filled causally, so they must not be invented."""
+        from lear_dk1.impute import impute_frame
+
+        gappy = self.periodic_frame()
+        gappy.iloc[0:30] = np.nan
+
+        filled, report = impute_frame(gappy)
+        self.assertEqual(report["Price"]["unfilled_no_history"], 30)
+        self.assertTrue(filled["Price"].iloc[0:30].isna().all())
+
+    def test_first_complete_day_lands_on_midnight(self):
+        """Trimming must preserve the 24-rows-per-day grid."""
+        from lear_dk1.impute import first_complete_day, impute_frame
+
+        gappy = self.periodic_frame()
+        gappy.iloc[0:30] = np.nan
+        filled, _ = impute_frame(gappy)
+
+        start = first_complete_day(filled)
+        self.assertEqual(start.hour, 0)
+        self.assertFalse(filled.loc[start:].isna().any().any())
+
+    def test_complete_column_is_left_alone(self):
+        from lear_dk1.impute import impute_frame
+
+        truth = self.periodic_frame(days=30)
+        filled, report = impute_frame(truth)
+        pd.testing.assert_frame_equal(filled, truth)
+        self.assertEqual(report["Price"]["missing"], 0)
+
+
 class TestFormatting(unittest.TestCase):
 
     def test_duration_formatting(self):
