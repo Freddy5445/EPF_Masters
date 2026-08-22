@@ -156,16 +156,25 @@ def main(argv=None):
     except (IOError, OSError) as exc:
         print(f"error: could not read the dataset -- {exc}", file=sys.stderr)
         print(f"Build it first with:\n  python -m entsoe_tp.build_dataset "
-              f"--zone {args.dataset} --start 2015-01-05 --end 2025-09-30 "
-              f"--exog load-wind-solar", file=sys.stderr)
+              f"--zone {args.dataset} --start 2015-01-05 --end {DEFAULT_END_TEST} "
+              f"--exog load-wind-solar --allow-gaps", file=sys.stderr)
         return 1
     except ValueError as exc:
         message = exc.args[0] if exc.args else str(exc)
         print(f"error: {message}", file=sys.stderr)
-        # The most common cause is a window below the LassoLarsIC floor.
-        print(f"\nMinimum window is {minimum_calibration_window(2)} days for 2 "
-              f"exogenous inputs, {minimum_calibration_window(3)} for 3.",
-              file=sys.stderr)
+
+        # Add a hint only when it fits the failure. Printing the calibration
+        # window floor after, say, a NaN error sends the reader the wrong way.
+        lowered = message.lower()
+        if "contains nan" in lowered or "missing value" in lowered:
+            print(f"\nThe dataset has gaps that were not filled. Imputation runs "
+                  f"by default; if --no-impute was passed, drop it. Otherwise the "
+                  f"installed code may predate imputation being added -- check "
+                  f"that lear_dk1/impute.py exists and pull if not.", file=sys.stderr)
+        elif "calibration_window" in lowered:
+            print(f"\nMinimum window is {minimum_calibration_window(2)} days for 2 "
+                  f"exogenous inputs, {minimum_calibration_window(3)} for 3.",
+                  file=sys.stderr)
         return 1
 
     return 0

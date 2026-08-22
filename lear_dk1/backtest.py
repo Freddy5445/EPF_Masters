@@ -120,6 +120,17 @@ def run_window(df_train, df_test, calibration_window, run_dir, run_id,
             f"needs more samples than features; use at least {minimum} days."
         )
 
+    # sklearn's own NaN message names estimators and imputer pipelines, which
+    # points away from the actual cause; say what is wrong with the data here.
+    for name, frame in (("training", df_train), ("test", df_test)):
+        if frame.isna().any().any():
+            counts = frame.isna().sum()
+            raise ValueError(
+                f"The {name} data still contains missing values "
+                f"{counts[counts > 0].to_dict()}. LEAR cannot be fitted on NaN; "
+                f"imputation should have filled these before this point."
+            )
+
     forecast_dates = df_test.index[::24]
     real_values = pd.DataFrame(
         df_test.loc[:, ["Price"]].values.reshape(-1, 24),
