@@ -32,10 +32,12 @@ def main():
 
     # Reconstruct the full dataset in chronological order.
     df_full = pd.concat([df_train, df_test]).sort_index()
-    df_full.index.name = "Date"
+    # Naive local market time, not UTC -- the source NP.csv convention, per
+    # epftoolbox. Named explicitly so the CSV is unambiguous on its own.
+    df_full.index.name = "Date (local time, naive, ISO 8601)"
 
     output_path = os.path.join(THIS_DIR, "NP_full.csv")
-    df_full.to_csv(output_path)
+    df_full.to_csv(output_path, date_format="%Y-%m-%dT%H:%M:%S")
 
     print(f"Full Nord Pool dataset saved to: {output_path}")
     print(f"Rows: {len(df_full)}")
