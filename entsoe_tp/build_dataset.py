@@ -3,8 +3,10 @@ Build an epftoolbox-compatible dataset from the Transparency Platform.
 
     python -m entsoe_tp.build_dataset --zone DK1 --start 2016-01-01 --end 2024-12-31
 
-Writes ``datasets/<ZONE>.csv`` with the columns ``Date, Price, Exogenous 1,
-Exogenous 2``:
+Writes ``datasets/<ZONE>.csv``. Two exogenous layouts are available, chosen with
+``--exog``.
+
+``--exog load-windsolar`` (default) gives ``Date, Price, Exogenous 1, Exogenous 2``:
 
 ===============  =========================================  ==========================
 Column           Data item                                  Query
@@ -13,6 +15,26 @@ Price            Day-ahead prices [12.1.D]                  ``A44``
 Exogenous 1      Day-ahead total load forecast [6.1.B]      ``A65`` + ``processType=A01``
 Exogenous 2      Day-ahead wind & solar forecast [14.1.D]   ``A69`` + ``processType=A01``
 ===============  =========================================  ==========================
+
+``--exog load-wind-solar`` splits the renewables by production type, giving
+``Date, Price, Exogenous 1, Exogenous 2, Exogenous 3``:
+
+===============  =========================================  ==========================
+Column           Data item                                  Query
+===============  =========================================  ==========================
+Price            Day-ahead prices [12.1.D]                  ``A44``
+Exogenous 1      Day-ahead total load forecast [6.1.B]      ``A65`` + ``processType=A01``
+Exogenous 2      Day-ahead wind forecast (on+offshore)      ``A69``, ``psrType`` B18+B19
+Exogenous 3      Day-ahead solar forecast                   ``A69``, ``psrType`` B16
+===============  =========================================  ==========================
+
+The A69 document carries one TimeSeries per production type, so both renewable
+columns come from a single query that is fetched once and split afterwards.
+
+Note that the exogenous count drives the LEAR feature count
+(``96 + 7 + 72 * n_exogenous``), and ``LassoLarsIC`` requires more training
+samples than features -- so a 3-exogenous dataset (319 features) cannot be
+calibrated on windows shorter than roughly a year.
 
 Both exogenous series are day-ahead *forecasts*, so they are genuinely available
 at the time a day-ahead price forecast has to be made. Realised load and
@@ -44,6 +66,28 @@ DEFAULT_CACHE = os.path.join(PROJECT_ROOT, ".cache", "entsoe")
 # mixing resolutions in one series.
 MTU_SWITCHOVER = pd.Timestamp("2025-10-01")
 
+# psrType codes used by the wind & solar forecast document (A69).
+PSR_SOLAR = "B16"
+PSR_WIND_OFFSHORE = "B18"
+PSR_WIND_ONSHORE = "B19"
+
+EXOG_LAYOUTS = ("load-windsolar", "load-wind-solar")
+
+
+def _filter_psr(*codes):
+    """Build a filter keeping only the given production types from an A69 frame."""
+    def filter_fn(frame):
+        if frame.empty:
+            return frame
+        kept = frame[frame["psr_type"].isin(codes)]
+        if kept.empty:
+            raise ValueError(
+                f"The platform returned no data for production type(s) "
+                f"{', '.join(codes)}. This zone may not publish them separately."
+            )
+        return kept
+    return filter_fn
+
 
 def _filter_day_ahead(frame):
     """Keep only the day-ahead auction series from a price document.
@@ -65,8 +109,12 @@ def _filter_day_ahead(frame):
     return day_ahead if not day_ahead.empty else frame
 
 
-def _fetch_series(client, params, value_tag, aggregate, start_utc, end_utc,
-                  label, filter_fn=None, quiet=False):
+def _fetch_frame(client, params, value_tag, start_utc, end_utc, label, quiet=False):
+    """Fetch one query's whole date range and return the combined tidy frame.
+
+    Kept separate from column derivation so that a single query feeding several
+    columns -- as A69 does for wind and solar -- is only downloaded once.
+    """
     def progress(number, total, chunk_start, _chunk_end):
         if not quiet:
             print(f"  [{label}] chunk {number}/{total}  {chunk_start:%Y-%m}", flush=True)
@@ -76,17 +124,56 @@ def _fetch_series(client, params, value_tag, aggregate, start_utc, end_utc,
     frames = [parse_document(doc, value_tag) for doc in documents]
     frames = [f for f in frames if not f.empty]
     if not frames:
-        return pd.Series(dtype="float64",
-                         index=pd.DatetimeIndex([], tz="UTC", name="timestamp"))
+        return pd.DataFrame()
 
-    combined = pd.concat(frames, ignore_index=True)
-    if filter_fn is not None:
-        combined = filter_fn(combined)
-
-    return to_series(combined, aggregate=aggregate)
+    return pd.concat(frames, ignore_index=True)
 
 
-def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3, quiet=False):
+def _column_specs(area, exog):
+    """Return (queries, columns) for the requested exogenous layout.
+
+    ``queries`` maps a query key to (params, value_tag). ``columns`` is an
+    ordered list of (column_name, query_key, aggregate, filter_fn), so several
+    columns may share one query.
+    """
+    queries = {
+        "price": ({"documentType": "A44",
+                   "in_Domain": area.eic,
+                   "out_Domain": area.eic}, "price.amount"),
+        "load": ({"documentType": "A65",
+                  "processType": "A01",
+                  "outBiddingZone_Domain": area.eic}, "quantity"),
+        "renewables": ({"documentType": "A69",
+                        "processType": "A01",
+                        "in_Domain": area.eic}, "quantity"),
+    }
+
+    columns = [
+        ("Price", "price", "first", _filter_day_ahead),
+        ("Exogenous 1", "load", "first", None),
+    ]
+
+    if exog == "load-windsolar":
+        columns.append(("Exogenous 2", "renewables", "sum", None))
+    elif exog == "load-wind-solar":
+        columns.append(("Exogenous 2", "renewables", "sum",
+                        _filter_psr(PSR_WIND_OFFSHORE, PSR_WIND_ONSHORE)))
+        columns.append(("Exogenous 3", "renewables", "sum",
+                        _filter_psr(PSR_SOLAR)))
+    else:
+        raise ValueError(
+            f"Unknown --exog layout {exog!r}. Choose one of: {', '.join(EXOG_LAYOUTS)}"
+        )
+
+    # Drop any query no column actually needs.
+    used = {key for _, key, _, _ in columns}
+    queries = {k: v for k, v in queries.items() if k in used}
+
+    return queries, columns
+
+
+def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
+          exog="load-windsolar", quiet=False):
     """Fetch and assemble the dataset. Returns the finished DataFrame."""
     area = lookup(zone)
     start_date = pd.Timestamp(start).normalize()
@@ -112,25 +199,25 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3, quie
         print(f"Zone {area.code} ({area.name}, {area.eic}) in {area.tz}")
         print(f"Range {start_date.date()} to {end_date.date()} inclusive")
 
-    specs = [
-        ("Price", {"documentType": "A44",
-                   "in_Domain": area.eic,
-                   "out_Domain": area.eic},
-         "price.amount", "first", _filter_day_ahead),
-        ("Exogenous 1", {"documentType": "A65",
-                         "processType": "A01",
-                         "outBiddingZone_Domain": area.eic},
-         "quantity", "first", None),
-        ("Exogenous 2", {"documentType": "A69",
-                         "processType": "A01",
-                         "in_Domain": area.eic},
-         "quantity", "sum", None),
-    ]
+    queries, column_specs = _column_specs(area, exog)
+
+    # Fetch each distinct query once; wind and solar both derive from A69.
+    raw = {}
+    for key, (params, value_tag) in queries.items():
+        raw[key] = _fetch_frame(client, params, value_tag,
+                                start_utc, end_utc, key, quiet)
+        if raw[key].empty:
+            raise ValueError(
+                f"The platform returned no data for {key!r} in zone {area.code}. "
+                f"Check that this zone publishes that data item for the requested range."
+            )
 
     columns = {}
-    for label, params, value_tag, aggregate, filter_fn in specs:
-        series = _fetch_series(client, params, value_tag, aggregate,
-                               start_utc, end_utc, label, filter_fn, quiet)
+    for label, key, aggregate, filter_fn in column_specs:
+        frame_for_column = raw[key]
+        if filter_fn is not None:
+            frame_for_column = filter_fn(frame_for_column)
+        series = to_series(frame_for_column, aggregate=aggregate)
         if series.empty:
             raise ValueError(
                 f"The platform returned no data for {label} in zone {area.code}. "
@@ -163,6 +250,10 @@ def main(argv=None):
                         help="Bypass the local raw-XML cache and re-download")
     parser.add_argument("--max-gap", type=int, default=3,
                         help="Longest run of missing hours to interpolate (default 3)")
+    parser.add_argument("--exog", choices=EXOG_LAYOUTS, default="load-windsolar",
+                        help="Exogenous layout: 'load-windsolar' (2 columns, default) "
+                             "or 'load-wind-solar' (3 columns, renewables split by "
+                             "production type)")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
     args = parser.parse_args(argv)
 
@@ -177,6 +268,7 @@ def main(argv=None):
             end=args.end,
             cache_dir=None if args.no_cache else DEFAULT_CACHE,
             max_gap=args.max_gap,
+            exog=args.exog,
             quiet=args.quiet,
         )
     except (KeyError, ValueError, GridError, TransparencyError) as exc:

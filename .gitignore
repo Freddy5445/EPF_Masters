@@ -14,5 +14,9 @@ __pycache__/
 # csv files
 *.csv
 
+# Backtest run artifacts (forecasts, timings, run manifests). These are results,
+# not source; force-add a specific run if one is worth keeping for the write-up.
+experiments/
+
 # Claude Code local settings
 .claude/settings.local.json
