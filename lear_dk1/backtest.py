@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 from .compat import LEARCompat, PROJECT_ROOT, minimum_calibration_window, n_features
+from .impute import format_report, impute_frame
 
 # read_data lives in a TensorFlow-free subpackage, so this import is safe.
 if os.path.join(PROJECT_ROOT, "epftoolbox") not in sys.path:
@@ -215,7 +216,8 @@ def run_window(df_train, df_test, calibration_window, run_dir, run_id,
 
 
 def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
-                 calibration_windows, out_dir, run_name, quiet=False):
+                 calibration_windows, out_dir, run_name, data_start=None,
+                 impute=True, max_linear=3, quiet=False):
     """Backtest several calibration windows and record the whole run.
 
     ``begin_test_date`` and ``end_test_date`` must be datetime-like, not strings:
@@ -233,6 +235,47 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
         path=datasets_dir, dataset=dataset,
         begin_test_date=begin_test_date, end_test_date=end_test_date,
     )
+
+    # Trimming and imputation are done on the whole series, then re-split at the
+    # same boundary: filling from a neighbouring week needs to see across the
+    # train/test join, and a gap at the very start of training would otherwise
+    # be filled differently than one a few rows later.
+    combined = pd.concat([df_train, df_test], axis=0)
+    test_start = df_test.index[0]
+
+    if data_start is not None:
+        data_start = pd.Timestamp(data_start)
+        dropped = int((combined.index < data_start).sum())
+        combined = combined.loc[data_start:]
+        if dropped and not quiet:
+            print(f"Trimmed {dropped:,} hours before {data_start}")
+        if combined.empty:
+            raise ValueError(
+                f"--data-start {data_start} leaves no data; the dataset ends at "
+                f"{df_test.index[-1]}."
+            )
+        if test_start <= data_start:
+            raise ValueError(
+                f"--data-start {data_start} is at or after the test start "
+                f"{test_start}; there would be no training data."
+            )
+
+    imputation = None
+    if impute and combined.isna().any().any():
+        combined, imputation = impute_frame(combined, max_linear=max_linear)
+        if not quiet:
+            print("Imputed missing values:")
+            print(format_report(imputation, len(combined)))
+            print()
+    elif combined.isna().any().any():
+        counts = combined.isna().sum()
+        raise ValueError(
+            f"The dataset contains missing values and imputation is disabled: "
+            f"{counts[counts > 0].to_dict()}. LEAR cannot be fitted on NaN."
+        )
+
+    df_train = combined.loc[:test_start - pd.Timedelta(hours=1)]
+    df_test = combined.loc[test_start:]
 
     n_exogenous = len(df_train.columns) - 1
     test_days = len(df_test) // 24
@@ -260,6 +303,14 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
         "test_end": df_test.index[-1].isoformat(),
         "test_days": test_days,
         "calibration_windows": list(calibration_windows),
+        "data_start": str(data_start) if data_start is not None else None,
+        # What fraction of the input was invented, and how -- needed to report
+        # the result honestly.
+        "imputation": {
+            "applied": imputation is not None,
+            "max_linear_hours": max_linear,
+            "columns": imputation,
+        },
         "environment": environment_metadata(),
         "started_at": pd.Timestamp.now().isoformat(),
         "windows": [],
