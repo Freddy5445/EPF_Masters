@@ -141,7 +141,9 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3, quie
         )
 
     frame = pd.DataFrame(columns)
-    frame.index.name = "Date"
+    # Naive local market time, not UTC -- see hourly.py. Named explicitly so the
+    # CSV is unambiguous on its own, without requiring this module's docstring.
+    frame.index.name = f"Date ({area.tz} local time, naive, ISO 8601)"
     assert_epftoolbox_grid(frame)
 
     return frame
@@ -183,7 +185,7 @@ def main(argv=None):
         return 1
 
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    frame.to_csv(out, date_format="%Y-%m-%d %H:%M:%S")
+    frame.to_csv(out, date_format="%Y-%m-%dT%H:%M:%S")
 
     days = len(frame) // 24
     print(f"\nWrote {out}")

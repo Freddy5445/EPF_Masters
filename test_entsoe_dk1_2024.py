@@ -117,10 +117,12 @@ def main():
         "Solar Forecast": to_local_hourly_grid(solar_series, area.tz, start_date, end_date),
         "Wind Forecast": to_local_hourly_grid(wind_series, area.tz, start_date, end_date),
     })
-    frame.index.name = "Date"
+    # Naive local market time, not UTC -- see entsoe_tp/hourly.py. Named
+    # explicitly so the CSV is unambiguous on its own.
+    frame.index.name = f"Date ({area.tz} local time, naive, ISO 8601)"
     assert_epftoolbox_grid(frame)
 
-    frame.to_csv(OUT_PATH, date_format="%Y-%m-%d %H:%M:%S")
+    frame.to_csv(OUT_PATH, date_format="%Y-%m-%dT%H:%M:%S")
 
     print(f"\nWrote {OUT_PATH}")
     print(f"  {len(frame)} rows ({len(frame) // 24} days), {frame.index[0]} to {frame.index[-1]}")
