@@ -85,6 +85,40 @@ are not, and are deliberately not used.
 becomes `Price`, the rest become `Exogenous 1..N` — so the header names written here are
 for human readers only; the order is what matters.
 
+## Raw multi-zone dump
+
+`build_dataset` produces a *modelling* dataset and enforces what the epftoolbox
+models need. To study the data itself — how resolution, availability and
+completeness change across zones and over time — use the raw dump instead:
+
+```
+python -m entsoe_tp.raw_dump
+```
+
+Covers all 15 Nordic and Baltic zones (`DK1`, `DK2`, `NO1`–`NO5`, `SE1`–`SE4`,
+`FI`, `EE`, `LV`, `LT`) from 2016-01-01 to 2025-10-01 inclusive, and deliberately
+does the opposite of `build_dataset`:
+
+| `build_dataset` | `raw_dump` |
+|---|---|
+| Strict hourly grid, 24 rows per local day | No grid; rows exist only where data was published |
+| Refuses to mix `PT60M` and `PT15M` | Native resolution kept, recorded per observation |
+| Naive local time, DST folded | UTC as published — no folded or missing hour |
+| Interpolates or aborts on gaps | Neither; absence is absence |
+| Aborts if a production type is missing | Records it in the coverage manifest and continues |
+
+Output is one long/tidy Parquet file (`datasets/nordic_baltic_raw.parquet`) with
+one row per observation, carrying `resolution`, `psr_type`, `curve_type`,
+`business_type`, `unit` and `currency` alongside the value, plus a
+`*_manifest.csv` recording per zone and data item what was returned, which
+resolutions appeared, and what failed.
+
+Per-zone parts are written under `<out>.parts/`, so an interrupted run resumes
+by zone; pass `--refresh` to re-fetch. Needs `pyarrow`.
+
+The full run is roughly 5,800 requests and several million observations — expect
+tens of minutes on a cold cache.
+
 ## Things this handles that are easy to get wrong
 
 **`curveType=A03`.** The platform's default encoding publishes a `Point` only when the
