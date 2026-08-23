@@ -126,7 +126,7 @@ def _check_acknowledgement(root):
 
 
 def _expand_period(period, value_tag, expect_resolution):
-    """Expand one ``<Period>`` into ``(timestamp, value)`` pairs in UTC.
+    """Expand one ``<Period>`` into ``(timestamp, value, resolution)`` triples in UTC.
 
     Honours ``curveType=A03``: positions absent from the document inherit the
     most recent published value, and the final value is carried to the end of
@@ -183,7 +183,7 @@ def _expand_period(period, value_tag, expect_resolution):
             # is no earlier value to carry forward, so the slot is genuinely
             # unknown rather than zero.
             continue
-        expanded.append((start + (slot - 1) * step, current))
+        expanded.append((start + (slot - 1) * step, current, raw_resolution))
 
     return expanded
 
@@ -205,7 +205,9 @@ def parse_document(xml_text, value_tag, expect_resolution="PT60M"):
     except ET.ParseError as exc:
         raise TransparencyError(f"Response is not valid XML: {exc}") from exc
 
-    columns = ["timestamp", "value", "psr_type"] + list(_TS_ATTRS)
+    # ``resolution`` is carried per row rather than per document: a single
+    # response can mix resolutions when a range spans a market time unit change.
+    columns = ["timestamp", "value", "psr_type", "resolution"] + list(_TS_ATTRS)
 
     if _check_acknowledgement(root):
         return pd.DataFrame(columns=columns)
@@ -219,9 +221,11 @@ def parse_document(xml_text, value_tag, expect_resolution="PT60M"):
             psr_type = _findtext(mkt, "psrType")
 
         for period in _iterfind(ts, "Period"):
-            for timestamp, value in _expand_period(period, value_tag, expect_resolution):
+            for timestamp, value, resolution in _expand_period(
+                    period, value_tag, expect_resolution):
                 rows.append({"timestamp": timestamp, "value": value,
-                             "psr_type": psr_type, **attrs})
+                             "psr_type": psr_type, "resolution": resolution,
+                             **attrs})
 
     if not rows:
         return pd.DataFrame(columns=columns)

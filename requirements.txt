@@ -42,6 +42,8 @@ pandas==3.0.5
 patsy==1.0.2
 pillow==12.3.0
 protobuf==7.35.1
+# Parquet output for entsoe_tp.raw_dump; nothing else needs it.
+pyarrow==25.0.1
 pygments==2.21.0
 pyparsing==3.3.2
 python-dateutil==2.9.0.post0
