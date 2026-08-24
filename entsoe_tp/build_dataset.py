@@ -46,6 +46,15 @@ samples than features -- so a 3-exogenous dataset (319 features) cannot be
 calibrated on windows shorter than roughly a year, and adding the reservoir
 column (391 features) pushes that minimum to about 399 days.
 
+Sub-hourly publication is folded into hourly observations rather than truncating
+the range. Zones began emitting ``PT15M`` documents months before the day-ahead
+auction actually cleared sub-hourly -- NO2 in February 2025, DK1 in April -- and
+throughout that period the four quarters of an hour repeat one value, so folding
+them loses nothing. The range only has to stop where the quarters genuinely
+start to differ, which is what ``--stop-at-resolution-change`` finds. Averaging
+quarters that do differ would be a modelling choice, so it is never done
+silently.
+
 Re-running is incremental. Raw XML is cached per request, and finished columns
 are cached under ``.cache/entsoe/columns/``, so adding a column to an existing
 dataset downloads and parses only that column.
@@ -105,13 +114,72 @@ def _first_non_hourly(frame):
     """First timestamp in a parsed frame that is not hourly, or None.
 
     Zones moved to 15-minute market time units on different dates -- DK1 in
-    April 2025, NO2 in February -- so where the hourly era ends is a property of
-    the data, not a constant. It has to be measured per zone and per data item.
+    April 2025, NO2 in February -- so where sub-hourly publication starts is a
+    property of the data, not a constant.
+
+    Note this is *publication* granularity, not information content: see
+    :func:`_collapse_sub_hourly`.
     """
     if frame.empty or "resolution" not in frame.columns:
         return None
     other = frame[frame["resolution"] != HOURLY_RESOLUTION]
     return None if other.empty else other["timestamp"].min()
+
+
+def _group_keys(frame):
+    """Columns identifying one observation within an hour."""
+    keys = ["timestamp"]
+    if "psr_type" in frame.columns:
+        keys.append("psr_type")
+    return keys
+
+
+def _collapse_sub_hourly(frame, tolerance=1e-9):
+    """Fold sub-hourly observations into hourly ones, losslessly.
+
+    Publishing at 15-minute granularity is not the same as carrying 15-minute
+    *information*. Zones began emitting ``PT15M`` documents months before the
+    day-ahead auction actually cleared sub-hourly, and in that period all four
+    quarters of an hour repeat the same value. Collapsing them loses nothing,
+    whereas truncating the range at the first ``PT15M`` document would discard
+    months of perfectly good hourly data.
+
+    So the values decide, not the declared resolution. Quarters are folded to
+    the hour they fall in, and the spread within each hour is measured. Returns
+    ``(collapsed, first_varying)`` where ``first_varying`` is the first hour
+    whose sub-hourly values genuinely differ -- the real end of the hourly era
+    -- or None if they never do.
+
+    Averaging genuinely varying quarters is a modelling decision, not a parsing
+    one, so this never does it: the caller is told where variation begins.
+    """
+    if frame.empty or "resolution" not in frame.columns:
+        return frame, None
+
+    sub = frame[frame["resolution"] != HOURLY_RESOLUTION]
+    if sub.empty:
+        return frame, None
+
+    sub = sub.copy()
+    sub["timestamp"] = sub["timestamp"].dt.floor("h")
+    keys = _group_keys(sub)
+
+    spread = sub.groupby(keys, dropna=False, observed=True)["value"].agg(
+        lambda values: values.max() - values.min()
+    )
+    varying = spread[spread > tolerance]
+    first_varying = None
+    if len(varying):
+        index = varying.index
+        first_varying = (index.get_level_values("timestamp").min()
+                         if isinstance(index, pd.MultiIndex) else index.min())
+
+    # Identical within the hour, so any of them represents it.
+    collapsed = sub.groupby(keys, dropna=False, observed=True, as_index=False).first()
+
+    hourly = frame[frame["resolution"] == HOURLY_RESOLUTION]
+    combined = pd.concat([hourly, collapsed], ignore_index=True)
+    return combined, first_varying
 
 
 def _filter_psr(*codes):
@@ -366,29 +434,41 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
         units[key] = (_price_unit(raw[key]) if key == "price"
                       else _quantity_unit(raw[key]))
 
-    # The reservoir series is weekly by design, so only the hourly items are
-    # checked for a resolution change.
-    cutoffs = [_first_non_hourly(frame) for key, frame in raw.items()
-               if key != "reservoir"]
-    cutoffs = [c for c in cutoffs if c is not None]
+    # Fold sub-hourly publication into hourly observations. The reservoir series
+    # is weekly by design and is left alone.
+    variations = []
+    for key in list(raw):
+        if key == "reservoir":
+            continue
+        published_sub_hourly = _first_non_hourly(raw[key])
+        raw[key], first_varying = _collapse_sub_hourly(raw[key])
+        if not quiet and published_sub_hourly is not None:
+            local = published_sub_hourly.tz_convert(area.tz).tz_localize(None)
+            note = ("values vary" if first_varying is not None
+                    else "values identical within the hour, folded losslessly")
+            print(f"  [{key}] sub-hourly publication from {local} local; {note}")
+        if first_varying is not None:
+            variations.append(first_varying)
 
-    if cutoffs:
-        first_change = min(cutoffs)
+    if variations:
+        # The hourly era ends where the data actually starts varying inside the
+        # hour, which is later than where sub-hourly publication begins.
+        first_change = min(variations)
         local_change = first_change.tz_convert(area.tz).tz_localize(None)
         last_hourly_day = local_change.normalize() - pd.Timedelta(days=1)
 
         if last_hourly_day < end_date:
             if not stop_at_resolution_change:
                 raise ValueError(
-                    f"Zone {area.code} leaves hourly resolution at "
+                    f"Zone {area.code} carries genuine intra-hour variation from "
                     f"{local_change} local ({first_change} UTC), inside the "
-                    f"requested range. The epftoolbox models need 24 hourly "
-                    f"prices per day, so re-run with "
-                    f"--end {last_hourly_day.date()}, or pass "
-                    f"--stop-at-resolution-change to truncate automatically."
+                    f"requested range. Folding those quarters to an hour would "
+                    f"average away real information, which is a modelling "
+                    f"choice, so re-run with --end {last_hourly_day.date()}, or "
+                    f"pass --stop-at-resolution-change to truncate automatically."
                 )
             if not quiet:
-                print(f"\n  Market time unit changes at {local_change} local; "
+                print(f"\n  Intra-hour variation begins {local_change} local; "
                       f"truncating to {last_hourly_day.date()}\n")
             return build(
                 zone=zone, start=start, end=last_hourly_day, cache_dir=cache_dir,
@@ -400,14 +480,8 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
             )
 
     for label, key, aggregate, filter_fn, cache_path in plan:
+        # Already folded to the hourly grid above, so nothing sub-hourly remains.
         frame_for_column = raw[key]
-        if key != "reservoir":
-            # Any sub-hourly rows left inside the range would put timestamps
-            # off the hourly grid, so they are dropped rather than aggregated:
-            # how to aggregate them is a modelling choice, not a parsing one.
-            frame_for_column = frame_for_column[
-                frame_for_column["resolution"] == HOURLY_RESOLUTION
-            ]
         if filter_fn is not None:
             frame_for_column = filter_fn(frame_for_column)
         series = to_series(frame_for_column, aggregate=aggregate)
