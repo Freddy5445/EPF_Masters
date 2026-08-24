@@ -140,14 +140,36 @@ class TestZonesAndQueries(unittest.TestCase):
         for zone in DEFAULT_ZONES:
             self.assertTrue(lookup(zone).eic)
 
-    def test_three_data_items_are_queried(self):
+    def test_four_data_items_are_queried(self):
         queries = _queries("EIC")
         self.assertEqual(sorted(queries), ["generation_forecast", "load_forecast",
-                                           "price"])
+                                           "price", "reservoir"])
         self.assertEqual(queries["price"]["params"]["documentType"], "A44")
         self.assertEqual(queries["load_forecast"]["params"]["documentType"], "A65")
         self.assertEqual(queries["generation_forecast"]["params"]["documentType"],
                          "A69")
+        self.assertEqual(queries["reservoir"]["params"]["documentType"], "A72")
+        self.assertEqual(queries["reservoir"]["params"]["processType"], "A16")
+
+    def test_weekly_reservoir_needs_no_special_handling(self):
+        """P7D is recorded like any other resolution; nothing resamples it."""
+        weekly = (f'<GL_MarketDocument {NS}><TimeSeries>'
+                  f'<quantity_Measure_Unit.name>MWH</quantity_Measure_Unit.name>'
+                  f'<Period><timeInterval><start>2020-01-06T00:00Z</start>'
+                  f'<end>2020-01-27T00:00Z</end></timeInterval>'
+                  f'<resolution>P7D</resolution>'
+                  + "".join(f"<Point><position>{i}</position>"
+                            f"<quantity>{1000 * i}</quantity></Point>"
+                            for i in range(1, 4))
+                  + f'</Period></TimeSeries></GL_MarketDocument>')
+
+        frame = parse_document(weekly, "quantity", expect_resolution=None)
+        shaped = _shape(frame, "NO2", "EIC", "reservoir", {"documentType": "A72"})
+
+        self.assertEqual(list(shaped["resolution"].unique()), ["P7D"])
+        self.assertEqual(len(shaped), 3)
+        deltas = shaped["timestamp_utc"].diff().dropna().unique()
+        self.assertEqual(list(deltas), [pd.Timedelta(days=7)])
 
 
 class TestCombineParts(unittest.TestCase):

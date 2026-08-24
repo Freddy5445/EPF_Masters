@@ -150,6 +150,20 @@ does the opposite of `build_dataset`:
 | Interpolates or aborts on gaps | Neither; absence is absence |
 | Aborts if a production type is missing | Records it in the coverage manifest and continues |
 
+Four data items are captured per zone:
+
+| `variable` | Data item | Query |
+|---|---|---|
+| `price` | Day-ahead prices [12.1.D] | `A44` |
+| `load_forecast` | Day-ahead total load forecast [6.1.B] | `A65` + `processType=A01` |
+| `generation_forecast` | Day-ahead wind & solar forecast [14.1.D] | `A69` + `processType=A01` |
+| `reservoir` | Water reservoirs & hydro storage [16.1.D] | `A72` + `processType=A16` |
+
+The reservoir series is weekly (`P7D`) rather than hourly. That needs no special
+handling here — its resolution is recorded per observation like any other, and
+nothing is resampled, aligned or held constant. Zones with no hydro storage
+return nothing, which the manifest records.
+
 Output is one long/tidy Parquet file (`datasets/nordic_baltic_raw.parquet`) with
 one row per observation, carrying `resolution`, `psr_type`, `curve_type`,
 `business_type`, `unit` and `currency` alongside the value, plus a
