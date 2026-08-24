@@ -18,8 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from entsoe_tp.areas import lookup  # noqa: E402
 from entsoe_tp.build_dataset import (  # noqa: E402
-    RESERVOIR_PERIOD, _column_cache_path, _column_specs, _load_cached_column,
-    _store_cached_column,
+    RESERVOIR_PERIOD, _collapse_sub_hourly, _column_cache_path, _column_specs,
+    _first_non_hourly, _load_cached_column, _store_cached_column,
 )
 from entsoe_tp.hourly import GridError, to_local_hourly_step  # noqa: E402
 
@@ -119,6 +119,119 @@ class TestReservoirColumnWiring(unittest.TestCase):
         queries, _ = _column_specs(area, "load-wind-solar", include_reservoir=True)
         self.assertIsNone(queries["reservoir"][2])
         self.assertEqual(queries["price"][2], "PT60M")
+
+
+class TestSubHourlyFolding(unittest.TestCase):
+    """Sub-hourly publication is not the same as sub-hourly information.
+
+    Zones began emitting PT15M documents months before the day-ahead auction
+    cleared sub-hourly -- NO2 in February 2025, DK1 in April -- and in that
+    period all four quarters of an hour repeat one value. Folding them is
+    lossless; truncating at the first PT15M document would throw away months of
+    good hourly data. So the values decide, not the declared resolution.
+    """
+
+    def quarters(self, per_hour, psr=None, start="2025-03-01"):
+        rows = []
+        for hour, values in enumerate(per_hour):
+            for quarter, value in enumerate(values):
+                rows.append({
+                    "timestamp": pd.Timestamp(start, tz="UTC")
+                    + pd.Timedelta(hours=hour, minutes=15 * quarter),
+                    "value": float(value), "resolution": "PT15M",
+                    "psr_type": psr,
+                })
+        return pd.DataFrame(rows)
+
+    def test_identical_quarters_fold_losslessly(self):
+        frame = self.quarters([[50] * 4, [60] * 4, [70] * 4])
+        collapsed, first_varying = _collapse_sub_hourly(frame)
+
+        self.assertIsNone(first_varying)
+        self.assertEqual(len(collapsed), 3)
+        self.assertEqual(sorted(collapsed["value"]), [50.0, 60.0, 70.0])
+        self.assertTrue(all(t.minute == 0 for t in collapsed["timestamp"]))
+
+    def test_varying_quarters_are_reported_not_averaged(self):
+        frame = self.quarters([[50] * 4, [60, 61, 62, 63]])
+        _, first_varying = _collapse_sub_hourly(frame)
+        self.assertEqual(first_varying,
+                         pd.Timestamp("2025-03-01 01:00", tz="UTC"))
+
+    def test_hourly_rows_pass_through_untouched(self):
+        hourly = pd.DataFrame([{
+            "timestamp": pd.Timestamp("2025-02-28 23:00", tz="UTC"),
+            "value": 40.0, "resolution": "PT60M", "psr_type": None,
+        }])
+        frame = pd.concat([hourly, self.quarters([[50] * 4])], ignore_index=True)
+        collapsed, first_varying = _collapse_sub_hourly(frame)
+
+        self.assertIsNone(first_varying)
+        self.assertEqual(sorted(collapsed["value"]), [40.0, 50.0])
+
+    def test_production_types_fold_independently(self):
+        frame = pd.concat([self.quarters([[100] * 4], psr="B16"),
+                           self.quarters([[700] * 4], psr="B19")],
+                          ignore_index=True)
+        collapsed, first_varying = _collapse_sub_hourly(frame)
+
+        self.assertIsNone(first_varying)
+        self.assertEqual(len(collapsed), 2)
+        self.assertEqual(dict(zip(collapsed["psr_type"], collapsed["value"])),
+                         {"B16": 100.0, "B19": 700.0})
+
+    def test_a_wholly_hourly_frame_is_unchanged(self):
+        hourly = pd.DataFrame([{
+            "timestamp": pd.Timestamp("2025-01-01", tz="UTC"),
+            "value": 1.0, "resolution": "PT60M", "psr_type": None,
+        }])
+        collapsed, first_varying = _collapse_sub_hourly(hourly)
+        self.assertIsNone(first_varying)
+        self.assertEqual(len(collapsed), 1)
+
+
+class TestResolutionBoundaryIsMeasured(unittest.TestCase):
+    """Where sub-hourly *publication* starts differs by zone, so it cannot be a
+    constant -- though it is not by itself the end of the hourly era."""
+
+    def frame(self, switch_at):
+        """A parsed frame that is hourly up to ``switch_at``, then 15-minute."""
+        hourly = pd.date_range(pd.Timestamp("2025-02-01", tz="UTC"), switch_at,
+                               freq="h", inclusive="left")
+        quarter = pd.date_range(switch_at, periods=96, freq="15min", tz="UTC")
+        return pd.DataFrame({
+            "timestamp": list(hourly) + list(quarter),
+            "value": 1.0,
+            "resolution": ["PT60M"] * len(hourly) + ["PT15M"] * len(quarter),
+        })
+
+    def test_finds_the_first_non_hourly_timestamp(self):
+        switch = pd.Timestamp("2025-02-20 23:00", tz="UTC")
+        self.assertEqual(_first_non_hourly(self.frame(switch)), switch)
+
+    def test_returns_none_when_wholly_hourly(self):
+        frame = self.frame(pd.Timestamp("2025-02-20 23:00", tz="UTC"))
+        frame = frame[frame["resolution"] == "PT60M"]
+        self.assertIsNone(_first_non_hourly(frame))
+
+    def test_returns_none_for_an_empty_frame(self):
+        self.assertIsNone(_first_non_hourly(pd.DataFrame()))
+
+    def test_last_hourly_day_is_the_day_before_the_change(self):
+        """The boundary derives from the first *varying* hour, in local time."""
+        switch = pd.Timestamp("2025-02-20 23:00", tz="UTC")
+        local = switch.tz_convert("Europe/Oslo").tz_localize(None)
+        last_hourly_day = local.normalize() - pd.Timedelta(days=1)
+        self.assertEqual(last_hourly_day, pd.Timestamp("2025-02-20"))
+
+    def test_switchover_constant_is_not_used_to_decide_anything(self):
+        """It is kept only as a reference point, never as a boundary."""
+        import inspect
+
+        from entsoe_tp import build_dataset
+
+        source = inspect.getsource(build_dataset.build)
+        self.assertNotIn("MTU_SWITCHOVER", source)
 
 
 class TestColumnCache(unittest.TestCase):

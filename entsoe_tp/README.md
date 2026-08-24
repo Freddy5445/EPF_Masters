@@ -120,6 +120,26 @@ python -m entsoe_tp.build_dataset --zone NO2 --start 2016-01-01 --end 2025-04-07
 Pass `--refresh-columns` to recompute columns from cached XML, or `--no-cache`
 to re-download everything.
 
+## Sub-hourly publication is folded, not truncated
+
+Zones began publishing `PT15M` documents months before the day-ahead auction
+actually cleared sub-hourly — NO2 in February 2025, DK1 in April, against an
+EU-wide deadline of 2025-10-01. Throughout that period the four quarters of an
+hour repeat a single value, so folding them to hourly is **lossless**, and
+stopping the range at the first `PT15M` document would discard months of good
+data.
+
+So the values decide, not the declared resolution:
+
+- quarters that are identical within the hour are folded, and the build
+  continues;
+- where they genuinely differ, the build stops and names the last clean day,
+  because averaging real intra-hour variation is a modelling choice rather than
+  a parsing one.
+
+`--stop-at-resolution-change` truncates to that day automatically instead of
+failing — useful across zones, since each has its own boundary.
+
 Both exogenous series are *forecasts* published day-ahead, so they are genuinely
 available when a day-ahead price forecast has to be made. Realised load and generation
 are not, and are deliberately not used.

@@ -46,6 +46,15 @@ samples than features -- so a 3-exogenous dataset (319 features) cannot be
 calibrated on windows shorter than roughly a year, and adding the reservoir
 column (391 features) pushes that minimum to about 399 days.
 
+Sub-hourly publication is folded into hourly observations rather than truncating
+the range. Zones began emitting ``PT15M`` documents months before the day-ahead
+auction actually cleared sub-hourly -- NO2 in February 2025, DK1 in April -- and
+throughout that period the four quarters of an hour repeat one value, so folding
+them loses nothing. The range only has to stop where the quarters genuinely
+start to differ, which is what ``--stop-at-resolution-change`` finds. Averaging
+quarters that do differ would be a modelling choice, so it is never done
+silently.
+
 Re-running is incremental. Raw XML is cached per request, and finished columns
 are cached under ``.cache/entsoe/columns/``, so adding a column to an existing
 dataset downloads and parses only that column.
@@ -79,10 +88,11 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(THIS_DIR)
 DEFAULT_CACHE = os.path.join(PROJECT_ROOT, ".cache", "entsoe")
 
-# Day-ahead market time units moved from 60 to 15 minutes across European
-# bidding zones on this date. Everything before it is hourly, which is what the
-# epftoolbox models assume; refuse to cross the boundary rather than silently
-# mixing resolutions in one series.
+# The EU-wide deadline for day-ahead market time units to move from 60 to 15
+# minutes. It is *not* when any given zone actually switched: DK1 moved in April
+# 2025 and NO2 in February, both well before it. Nothing decides behaviour from
+# this date -- the real boundary is measured per zone by _first_non_hourly --
+# and it is kept only as a reference point for reporting.
 MTU_SWITCHOVER = pd.Timestamp("2025-10-01")
 
 # psrType codes used by the wind & solar forecast document (A69).
@@ -96,6 +106,80 @@ EXOG_LAYOUTS = ("load-windsolar", "load-wind-solar")
 # is a stock (stored energy) rather than a flow, so it is expanded onto the
 # hourly grid as a step function rather than aligned like the hourly series.
 RESERVOIR_PERIOD = pd.Timedelta(days=7)
+
+HOURLY_RESOLUTION = "PT60M"
+
+
+def _first_non_hourly(frame):
+    """First timestamp in a parsed frame that is not hourly, or None.
+
+    Zones moved to 15-minute market time units on different dates -- DK1 in
+    April 2025, NO2 in February -- so where sub-hourly publication starts is a
+    property of the data, not a constant.
+
+    Note this is *publication* granularity, not information content: see
+    :func:`_collapse_sub_hourly`.
+    """
+    if frame.empty or "resolution" not in frame.columns:
+        return None
+    other = frame[frame["resolution"] != HOURLY_RESOLUTION]
+    return None if other.empty else other["timestamp"].min()
+
+
+def _group_keys(frame):
+    """Columns identifying one observation within an hour."""
+    keys = ["timestamp"]
+    if "psr_type" in frame.columns:
+        keys.append("psr_type")
+    return keys
+
+
+def _collapse_sub_hourly(frame, tolerance=1e-9):
+    """Fold sub-hourly observations into hourly ones, losslessly.
+
+    Publishing at 15-minute granularity is not the same as carrying 15-minute
+    *information*. Zones began emitting ``PT15M`` documents months before the
+    day-ahead auction actually cleared sub-hourly, and in that period all four
+    quarters of an hour repeat the same value. Collapsing them loses nothing,
+    whereas truncating the range at the first ``PT15M`` document would discard
+    months of perfectly good hourly data.
+
+    So the values decide, not the declared resolution. Quarters are folded to
+    the hour they fall in, and the spread within each hour is measured. Returns
+    ``(collapsed, first_varying)`` where ``first_varying`` is the first hour
+    whose sub-hourly values genuinely differ -- the real end of the hourly era
+    -- or None if they never do.
+
+    Averaging genuinely varying quarters is a modelling decision, not a parsing
+    one, so this never does it: the caller is told where variation begins.
+    """
+    if frame.empty or "resolution" not in frame.columns:
+        return frame, None
+
+    sub = frame[frame["resolution"] != HOURLY_RESOLUTION]
+    if sub.empty:
+        return frame, None
+
+    sub = sub.copy()
+    sub["timestamp"] = sub["timestamp"].dt.floor("h")
+    keys = _group_keys(sub)
+
+    spread = sub.groupby(keys, dropna=False, observed=True)["value"].agg(
+        lambda values: values.max() - values.min()
+    )
+    varying = spread[spread > tolerance]
+    first_varying = None
+    if len(varying):
+        index = varying.index
+        first_varying = (index.get_level_values("timestamp").min()
+                         if isinstance(index, pd.MultiIndex) else index.min())
+
+    # Identical within the hour, so any of them represents it.
+    collapsed = sub.groupby(keys, dropna=False, observed=True, as_index=False).first()
+
+    hourly = frame[frame["resolution"] == HOURLY_RESOLUTION]
+    combined = pd.concat([hourly, collapsed], ignore_index=True)
+    return combined, first_varying
 
 
 def _filter_psr(*codes):
@@ -283,7 +367,8 @@ def _column_specs(area, exog, include_reservoir=False):
 
 def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
           exog="load-windsolar", allow_gaps=False, include_reservoir=False,
-          reservoir_lag_days=0, refresh_columns=False, quiet=False):
+          reservoir_lag_days=0, refresh_columns=False,
+          stop_at_resolution_change=False, quiet=False):
     """Fetch and assemble the dataset. Returns the finished DataFrame."""
     area = lookup(zone)
     start_date = pd.Timestamp(start).normalize()
@@ -291,13 +376,6 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
 
     if start_date > end_date:
         raise ValueError(f"--start {start_date.date()} is after --end {end_date.date()}")
-    if end_date >= MTU_SWITCHOVER:
-        raise ValueError(
-            f"--end {end_date.date()} reaches into the 15-minute market time unit era "
-            f"(from {MTU_SWITCHOVER.date()}). The epftoolbox models require 24 hourly "
-            f"prices per day; choose an earlier end date."
-        )
-
     # The platform works in UTC, but the calendar days we want are local ones.
     start_utc = start_date.tz_localize(area.tz, nonexistent="shift_forward").tz_convert("UTC")
     end_utc = (end_date + pd.Timedelta(days=1)).tz_localize(
@@ -311,30 +389,10 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
 
     queries, column_specs = _column_specs(area, exog, include_reservoir)
 
-    # Queries are fetched lazily, only when a column that needs one is not
-    # already cached. Adding a column to an existing dataset therefore downloads
-    # and parses just that column.
-    raw = {}
-    units = {}
-
-    def source(key):
-        if key not in raw:
-            params, value_tag, expect_resolution = queries[key]
-            raw[key] = _fetch_frame(client, params, value_tag,
-                                    start_utc, end_utc, key,
-                                    expect_resolution=expect_resolution,
-                                    quiet=quiet)
-            if raw[key].empty:
-                raise ValueError(
-                    f"The platform returned no data for {key!r} in zone "
-                    f"{area.code}. Check that this zone publishes that data item "
-                    f"for the requested range."
-                )
-            units[key] = (_price_unit(raw[key]) if key == "price"
-                          else _quantity_unit(raw[key]))
-        return raw[key]
-
+    # Plan first: a cached column needs no query at all, so adding one column to
+    # an existing dataset fetches only that column's data item.
     columns = {}
+    plan = []
     for label, key, aggregate, filter_fn in column_specs:
         cache_key = {
             "eic": area.eic, "tz": area.tz, "label": label, "key": key,
@@ -356,7 +414,74 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
             columns[cached_label] = cached_series
             continue
 
-        frame_for_column = source(key)
+        plan.append((label, key, aggregate, filter_fn, cache_path))
+
+    # Fetch each still-needed query once. Parsing is permissive so that a change
+    # of market time unit is measured rather than raised on: where the hourly
+    # era ends differs by zone, so it cannot be assumed.
+    raw = {}
+    units = {}
+    for key in dict.fromkeys(spec[1] for spec in plan):
+        params, value_tag, _ = queries[key]
+        raw[key] = _fetch_frame(client, params, value_tag, start_utc, end_utc,
+                                key, expect_resolution=None, quiet=quiet)
+        if raw[key].empty:
+            raise ValueError(
+                f"The platform returned no data for {key!r} in zone "
+                f"{area.code}. Check that this zone publishes that data item "
+                f"for the requested range."
+            )
+        units[key] = (_price_unit(raw[key]) if key == "price"
+                      else _quantity_unit(raw[key]))
+
+    # Fold sub-hourly publication into hourly observations. The reservoir series
+    # is weekly by design and is left alone.
+    variations = []
+    for key in list(raw):
+        if key == "reservoir":
+            continue
+        published_sub_hourly = _first_non_hourly(raw[key])
+        raw[key], first_varying = _collapse_sub_hourly(raw[key])
+        if not quiet and published_sub_hourly is not None:
+            local = published_sub_hourly.tz_convert(area.tz).tz_localize(None)
+            note = ("values vary" if first_varying is not None
+                    else "values identical within the hour, folded losslessly")
+            print(f"  [{key}] sub-hourly publication from {local} local; {note}")
+        if first_varying is not None:
+            variations.append(first_varying)
+
+    if variations:
+        # The hourly era ends where the data actually starts varying inside the
+        # hour, which is later than where sub-hourly publication begins.
+        first_change = min(variations)
+        local_change = first_change.tz_convert(area.tz).tz_localize(None)
+        last_hourly_day = local_change.normalize() - pd.Timedelta(days=1)
+
+        if last_hourly_day < end_date:
+            if not stop_at_resolution_change:
+                raise ValueError(
+                    f"Zone {area.code} carries genuine intra-hour variation from "
+                    f"{local_change} local ({first_change} UTC), inside the "
+                    f"requested range. Folding those quarters to an hour would "
+                    f"average away real information, which is a modelling "
+                    f"choice, so re-run with --end {last_hourly_day.date()}, or "
+                    f"pass --stop-at-resolution-change to truncate automatically."
+                )
+            if not quiet:
+                print(f"\n  Intra-hour variation begins {local_change} local; "
+                      f"truncating to {last_hourly_day.date()}\n")
+            return build(
+                zone=zone, start=start, end=last_hourly_day, cache_dir=cache_dir,
+                token=token, max_gap=max_gap, exog=exog, allow_gaps=allow_gaps,
+                include_reservoir=include_reservoir,
+                reservoir_lag_days=reservoir_lag_days,
+                refresh_columns=refresh_columns,
+                stop_at_resolution_change=False, quiet=quiet,
+            )
+
+    for label, key, aggregate, filter_fn, cache_path in plan:
+        # Already folded to the hourly grid above, so nothing sub-hourly remains.
+        frame_for_column = raw[key]
         if filter_fn is not None:
             frame_for_column = filter_fn(frame_for_column)
         series = to_series(frame_for_column, aggregate=aggregate)
@@ -423,6 +548,11 @@ def main(argv=None):
                              "value is treated as known (default 0, on top of the "
                              "7-day period it describes). Raise it to model the "
                              "platform's own reporting delay.")
+    parser.add_argument("--stop-at-resolution-change", action="store_true",
+                        help="Truncate the range at the last full hourly day "
+                             "instead of failing, when the zone's market time "
+                             "unit changes inside it. Zones switch on different "
+                             "dates, so this finds the boundary per zone.")
     parser.add_argument("--refresh-columns", action="store_true",
                         help="Recompute every column instead of reusing cached "
                              "ones. Raw XML is still served from cache.")
@@ -450,6 +580,7 @@ def main(argv=None):
             include_reservoir=args.include_reservoir,
             reservoir_lag_days=args.reservoir_lag_days,
             refresh_columns=args.refresh_columns,
+            stop_at_resolution_change=args.stop_at_resolution_change,
             quiet=args.quiet,
         )
     except (KeyError, ValueError, GridError, TransparencyError) as exc:
