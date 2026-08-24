@@ -40,11 +40,11 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATASETS = os.path.join(THIS_DIR, "datasets")
 DEFAULT_OUT = os.path.join(THIS_DIR, "experiments")
 
-# Feasible analogue of the LEAR ensemble from Lago et al. (2021). Their 56- and
-# 84-day windows cannot be used here: modern scikit-learn's LassoLarsIC refuses
-# to fit when samples < features, and LEAR has 247 features with two exogenous
-# inputs and 319 with three.
-DEFAULT_WINDOWS = (364, 728, 1092, 1456)
+# The LEAR ensemble of Lago et al. (2021): 8 weeks, 12 weeks, 3 years, 4 years.
+# The two short windows have fewer samples than regressors, which scikit-learn's
+# LassoLarsIC refuses by default; LEARCompat.recalibrate supplies the noise
+# variance so they fit, as the published implementation did.
+DEFAULT_WINDOWS = (56, 84, 1092, 1456)
 
 # ENTSO-E publishes DK1 too sparsely before this to be worth imputing: the
 # Transparency Platform went live on 2015-01-05 and took a couple of days to
@@ -190,9 +190,8 @@ def main(argv=None):
                   f"installed code may predate imputation being added -- check "
                   f"that lear_dk1/impute.py exists and pull if not.", file=sys.stderr)
         elif "calibration_window" in lowered:
-            print(f"\nMinimum window is {minimum_calibration_window(2)} days for 2 "
-                  f"exogenous inputs, {minimum_calibration_window(3)} for 3.",
-                  file=sys.stderr)
+            print(f"\nMinimum window is {minimum_calibration_window()} days, the "
+                  f"shortest window Lago et al. (2021) run LEAR on.", file=sys.stderr)
         return 1
 
     return 0

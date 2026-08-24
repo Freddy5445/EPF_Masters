@@ -22,6 +22,7 @@ from lear_dk1.backtest import (  # noqa: E402
 from lear_dk1.compat import (  # noqa: E402
     LEARCompat, minimum_calibration_window, n_features,
 )
+import run_lear_dk1  # noqa: E402
 
 HOURS = [f"h{h}" for h in range(24)]
 
@@ -46,18 +47,24 @@ class TestFeatureCounts(unittest.TestCase):
         self.assertEqual(n_features(2), 247)
         self.assertEqual(n_features(3), 319)
 
-    def test_minimum_window_exceeds_feature_count(self):
-        for n_exog in (1, 2, 3):
-            self.assertGreater(minimum_calibration_window(n_exog), n_features(n_exog))
+    def test_minimum_window_is_the_papers_floor(self):
+        """8 weeks, independent of how many exogenous inputs the dataset has.
 
-    def test_paper_short_windows_are_rejected(self):
-        """The 56/84-day windows of the original LEAR ensemble cannot be used.
-
-        LassoLarsIC needs more samples than features, and LEAR has at least 175
-        features. This is why the ensemble here starts at 364 days.
+        The floor used to be ``n_features + 8``, because LassoLarsIC refuses to fit
+        fewer samples than features unless the noise variance is supplied. It is,
+        now (see LEARCompat.recalibrate), so the binding constraint is the paper's.
         """
+        self.assertEqual(minimum_calibration_window(), 56)
+        for n_exog in (1, 2, 3):
+            self.assertEqual(minimum_calibration_window(n_exog), 56)
+
+    def test_paper_short_windows_are_accepted(self):
+        """The 56- and 84-day members of the published ensemble must be usable."""
         for window in (56, 84):
-            self.assertLess(window, minimum_calibration_window(1))
+            self.assertGreaterEqual(window, minimum_calibration_window())
+
+    def test_default_windows_are_the_published_ensemble(self):
+        self.assertEqual(run_lear_dk1.DEFAULT_WINDOWS, (56, 84, 1092, 1456))
 
 
 class TestCompatSubclass(unittest.TestCase):

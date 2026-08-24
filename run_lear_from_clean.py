@@ -55,9 +55,20 @@ LAYOUTS = {
     # The panel carries reservoir for the hydro zones, which the CSV-building path in
     # build_dataset offers as --include-reservoir. Hydro goes last so the columns before
     # it keep the positions read_data binds on.
+    "load-windsolar-hydro": [PRICE, LOAD, WINDSOLAR, HYDRO],
     "load-wind-hydro": [PRICE, LOAD, WIND, HYDRO],
     "load-wind-solar-hydro": [PRICE, LOAD, WIND, SOLAR, HYDRO],
 }
+
+# Lago et al. (2021) evaluate on the last 104 weeks, i.e. two 364-day "years". The
+# 364-day year keeps the test set an exact number of weeks, so every day-of-week
+# dummy appears equally often in it.
+TEST_DAYS = 728
+
+
+def dataset_name_for(zone, layout):
+    """Name of the projected dataset, and so of the run directory derived from it."""
+    return f"{zone}_clean_{layout}"
 
 
 def series_for(panel, zone, variable, psr_types):
@@ -182,8 +193,10 @@ def main(argv=None):
         return 1
 
     # A name of its own, so the projected CSV never overwrites a dataset that
-    # build_dataset produced for the same zone.
-    dataset_name = f"{args.zone}_clean"
+    # build_dataset produced for the same zone. The layout is part of it because the
+    # run directory is derived from the dataset name: without it, running two layouts
+    # for one zone would silently overwrite the first layout's CSV and forecasts.
+    dataset_name = dataset_name_for(args.zone, args.exog)
 
     try:
         _, start_date, end_date = build_csv(
@@ -195,34 +208,44 @@ def main(argv=None):
     if args.csv_only:
         return 0
 
-    # LassoLarsIC will not fit fewer samples than features, so check the window against
-    # this layout's exogenous count before starting work rather than failing partway in.
-    n_exog = len(LAYOUTS[args.exog]) - 1  # every column but the price
-    floor = minimum_calibration_window(n_exog)
+    # Check the windows before starting work rather than failing partway in. The floor
+    # is the paper's own 8 weeks and no longer depends on the exogenous count, so with
+    # the default ensemble nothing is ever dropped; the check stays because --windows
+    # can name anything.
+    floor = minimum_calibration_window()
     if not any(flag.startswith("--windows") for flag in passthrough):
-        feasible = [w for w in run_lear_dk1.DEFAULT_WINDOWS if w > floor]
+        feasible = [w for w in run_lear_dk1.DEFAULT_WINDOWS if w >= floor]
         if not feasible:
-            print(f"error: {args.exog} has {n_exog} exogenous inputs, needing a window "
-                  f"longer than {floor} days; none of the defaults "
-                  f"{run_lear_dk1.DEFAULT_WINDOWS} qualify. Pass --windows explicitly.",
+            print(f"error: none of the default windows {run_lear_dk1.DEFAULT_WINDOWS} "
+                  f"reaches the {floor}-day floor. Pass --windows explicitly.",
                   file=sys.stderr)
             return 1
         if len(feasible) != len(run_lear_dk1.DEFAULT_WINDOWS):
-            dropped = [w for w in run_lear_dk1.DEFAULT_WINDOWS if w <= floor]
-            print(f"note: dropping window(s) {dropped} -- {n_exog} exogenous inputs need "
-                  f"more than {floor} days\n")
+            dropped = [w for w in run_lear_dk1.DEFAULT_WINDOWS if w < floor]
+            print(f"note: dropping window(s) {dropped} -- below the {floor}-day "
+                  f"floor\n")
         passthrough += ["--windows", ",".join(str(w) for w in feasible)]
 
     # Default the test range to what the panel actually holds. The last day is its last
-    # complete local day; the first is one calibration window plus a margin after the
-    # start, so the smallest window has something to train on.
+    # complete local day; the first is 728 days before that, the paper's 104-week test
+    # period. Zones end on different days -- the notebook cuts each at its own switch to
+    # 15-minute prices -- so this is derived per zone rather than hard-coded.
     if not any(flag.startswith("--end-test") for flag in passthrough):
         passthrough += ["--end-test", str(end_date.date())]
     if not any(flag.startswith("--begin-test") for flag in passthrough):
-        smallest = min(int(w) for w in _windows_from(passthrough, floor))
-        begin = start_date + pd.Timedelta(days=smallest + 14)
-        default = pd.Timestamp(run_lear_dk1.DEFAULT_BEGIN_TEST)
-        passthrough += ["--begin-test", str(max(begin, default).date())]
+        begin = end_date - pd.Timedelta(days=TEST_DAYS - 1)
+
+        # The longest window must have its full history available on the first test day,
+        # or recalibrate_and_forecast_next_day quietly trains on whatever is there and
+        # the "1456-day" member of the ensemble is not a 1456-day window at all.
+        longest = max(int(w) for w in _windows_from(passthrough, floor))
+        earliest = start_date + pd.Timedelta(days=longest)
+        if begin < earliest:
+            print(f"note: {args.zone} starts {start_date.date()}, so the {longest}-day "
+                  f"window is only fully available from {earliest.date()}. Testing "
+                  f"{(end_date - earliest).days + 1} days instead of {TEST_DAYS}.\n")
+            begin = earliest
+        passthrough += ["--begin-test", str(begin.date())]
     if not any(flag.startswith("--data-start") for flag in passthrough):
         passthrough += ["--data-start", str(start_date.date())]
 
@@ -237,7 +260,7 @@ def _windows_from(flags, floor):
             return [w for w in flags[i + 1].split(",") if w.strip()]
         if flag.startswith("--windows="):
             return [w for w in flag.split("=", 1)[1].split(",") if w.strip()]
-    return [str(w) for w in run_lear_dk1.DEFAULT_WINDOWS if w > floor]
+    return [str(w) for w in run_lear_dk1.DEFAULT_WINDOWS if w >= floor]
 
 
 if __name__ == "__main__":
