@@ -33,9 +33,16 @@ so.
 
 **Output.** Under ``--out-dir`` (default ``experiments/``):
 
-* ``<zone>_clean_<layout>_<begin>_<end>/`` -- forecasts per window, per-day
-  timings, ``run_metadata.json`` and ``evaluation.json``. The layout is in the
-  name because two layouts for one zone would otherwise overwrite each other.
+* ``predictions_<layout>.csv`` -- **the deliverable.** One row per zone per hour:
+  ``timestamp_local, zone, forecast, observed``. The forecast is the ensemble
+  mean, which is what LEAR predicts; ``observed`` is the price that actually
+  cleared, never imputed.
+* ``<zone>_clean_<layout>_<begin>_<end>/`` -- ``predictions.csv`` for that zone
+  alone, plus the working state: one forecast file per calibration window,
+  per-day timings, ``run_metadata.json`` and ``evaluation.json``. The per-window
+  files exist so a run can resume and so the ensemble can be rebuilt. The layout
+  is in the directory name because two layouts for one zone would otherwise
+  overwrite each other.
 * ``summary_<layout>.csv`` -- MAE and rMAE for every zone, the cross-zone table.
 * ``logs/<zone>_<layout>.log`` -- what that zone's worker printed.
 * ``sweep_results.json`` -- per-zone status and wall clock.
@@ -192,10 +199,10 @@ def sweep(zones, layout, panel, datasets_dir, out_dir, log_dir, passthrough,
 
 
 def evaluate(sweep_results, layout, out_dir, datasets_dir, quiet=False):
-    """Score every zone that produced forecasts, and build the cross-zone table."""
-    from lear_dk1.evaluate import compare_zones, evaluate_run
+    """Score every zone that produced forecasts, and build the cross-zone outputs."""
+    from lear_dk1.evaluate import PREDICTIONS_FILE, compare_zones, evaluate_run
 
-    results = {}
+    results, predictions = {}, []
     for result in sorted(sweep_results, key=lambda r: r["zone"]):
         if result["status"] != "ok" or not result.get("run_dir"):
             continue
@@ -204,13 +211,26 @@ def evaluate(sweep_results, layout, out_dir, datasets_dir, quiet=False):
             results[zone] = evaluate_run(
                 result["run_dir"],
                 dataset=run_lear_from_clean.dataset_name_for(zone, layout),
-                datasets_dir=datasets_dir, quiet=True)
+                datasets_dir=datasets_dir, quiet=True, zone=zone)
         except (ValueError, OSError, KeyError) as exc:
             if not quiet:
                 print(f"  {zone}: not scored -- {type(exc).__name__}: {exc}"[:160])
+            continue
+        predictions.append(pd.read_csv(
+            os.path.join(result["run_dir"], PREDICTIONS_FILE),
+            parse_dates=["timestamp_local"]))
 
     if not results:
         return None
+
+    # One tidy table across zones: a row per zone-hour, forecast beside observed.
+    # Zones cover different date ranges -- each is cut at its own switch to
+    # 15-minute prices -- so this is a long format rather than a wide one, which
+    # would have to pad the ends with blanks.
+    combined = os.path.join(out_dir, f"predictions_{layout}.csv")
+    (pd.concat(predictions, ignore_index=True)
+       .sort_values(["zone", "timestamp_local"])
+       .to_csv(combined, index=False, date_format="%Y-%m-%dT%H:%M:%S"))
 
     table = compare_zones(results)
     path = os.path.join(out_dir, f"summary_{layout}.csv")
@@ -221,7 +241,8 @@ def evaluate(sweep_results, layout, out_dir, datasets_dir, quiet=False):
               f"than a weekly naive:")
         columns = [c for c in table.columns if c.startswith("rmae_")]
         print(table[columns].to_string())
-        print(f"\nwritten: {path}")
+        print(f"\nscores:      {path}")
+        print(f"predictions: {combined}")
     return table
 
 

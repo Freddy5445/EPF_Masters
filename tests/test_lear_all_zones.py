@@ -21,8 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import run_lear_all_zones  # noqa: E402
 import run_lear_from_clean  # noqa: E402
 from lear_dk1.evaluate import (  # noqa: E402
-    HOURS, build_ensemble, compare, evaluate_run, load_forecasts,
-    naive_weekly_mae, score,
+    HOURS, PREDICTIONS_FILE, build_ensemble, compare, evaluate_run,
+    hourly_predictions, load_forecasts, naive_weekly_mae, score,
+    zone_from_dataset,
 )
 
 sys.path.insert(0, os.path.join(
@@ -218,6 +219,41 @@ class TestEvaluateRun(unittest.TestCase):
             parsed = json.loads(text, parse_constant=reject)
             self.assertIn("ensemble", parsed["scores"])
 
+    def test_predictions_csv_is_written_with_observed_prices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = os.path.join(tmp, "run")
+            datasets = os.path.join(tmp, "datasets")
+            real = self._write_run(run_dir, days=40)
+            self._write_dataset(datasets, "NO1_clean_load-windsolar", real)
+
+            evaluate_run(run_dir, dataset="NO1_clean_load-windsolar",
+                         datasets_dir=datasets, quiet=True)
+
+            frame = pd.read_csv(os.path.join(run_dir, PREDICTIONS_FILE),
+                                parse_dates=["timestamp_local"])
+            self.assertEqual(len(frame), 40 * 24)
+            self.assertEqual(set(frame["zone"]), {"NO1"})
+            self.assertTrue(frame["forecast"].notna().all())
+            # The observed column must be the real prices, not a copy of the forecast.
+            np.testing.assert_allclose(
+                frame["observed"].to_numpy(), real.to_numpy(float).reshape(-1))
+
+    def test_saved_forecast_is_the_mean_of_the_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = os.path.join(tmp, "run")
+            datasets = os.path.join(tmp, "datasets")
+            real = self._write_run(run_dir, windows=(56, 84), days=40)
+            self._write_dataset(datasets, "NO1_clean_load-windsolar", real)
+
+            evaluate_run(run_dir, dataset="NO1_clean_load-windsolar",
+                         datasets_dir=datasets, quiet=True)
+
+            windows = load_forecasts(run_dir)
+            expected = np.mean([windows[w].to_numpy(float) for w in sorted(windows)],
+                               axis=0).reshape(-1)
+            frame = pd.read_csv(os.path.join(run_dir, PREDICTIONS_FILE))
+            np.testing.assert_allclose(frame["forecast"].to_numpy(), expected)
+
     def test_a_single_window_runs_no_self_comparison(self):
         """The ensemble of one window *is* that window; DM on it is 0/0."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -237,6 +273,50 @@ class TestEvaluateRun(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 evaluate_run(run_dir, quiet=True)
             self.assertIn("dataset", str(caught.exception))
+
+
+class TestHourlyPredictions(unittest.TestCase):
+    """The deliverable: one forecast per hour per zone, beside the observed price."""
+
+    def setUp(self):
+        self.index = pd.date_range("2023-03-01", periods=3, freq="D")
+        self.ensemble = pd.DataFrame(
+            np.arange(72, dtype=float).reshape(3, 24), index=self.index, columns=HOURS)
+        self.real = self.ensemble + 100.0
+
+    def test_one_row_per_hour(self):
+        frame = hourly_predictions(self.ensemble, self.real, "NO1")
+        self.assertEqual(len(frame), 3 * 24)
+        self.assertEqual(list(frame.columns),
+                         ["timestamp_local", "zone", "forecast", "observed"])
+        self.assertEqual(set(frame["zone"]), {"NO1"})
+
+    def test_hours_expand_in_chronological_order(self):
+        """Row-major reshape must give day0 h0..h23, then day1 -- not hour-major."""
+        frame = hourly_predictions(self.ensemble, self.real, "NO1")
+        self.assertEqual(frame["timestamp_local"].iloc[0], pd.Timestamp("2023-03-01 00:00"))
+        self.assertEqual(frame["timestamp_local"].iloc[1], pd.Timestamp("2023-03-01 01:00"))
+        self.assertEqual(frame["timestamp_local"].iloc[24], pd.Timestamp("2023-03-02 00:00"))
+        self.assertTrue(frame["timestamp_local"].is_monotonic_increasing)
+
+    def test_forecast_and_observed_stay_paired(self):
+        """A mis-shaped reshape would silently offset the two series against each other."""
+        frame = hourly_predictions(self.ensemble, self.real, "NO1")
+        np.testing.assert_allclose(frame["observed"] - frame["forecast"], 100.0)
+
+    def test_unpublished_prices_stay_missing(self):
+        real = self.real.copy()
+        real.iloc[1, 2] = np.nan
+        frame = hourly_predictions(self.ensemble, real, "NO1")
+        self.assertEqual(int(frame["observed"].isna().sum()), 1)
+        missing = frame.loc[frame["observed"].isna(), "timestamp_local"].iloc[0]
+        self.assertEqual(missing, pd.Timestamp("2023-03-02 02:00"))
+        # The forecast for that hour is still a real forecast and is kept.
+        self.assertTrue(np.isfinite(frame.loc[frame["observed"].isna(), "forecast"]).all())
+
+    def test_zone_is_derived_from_the_dataset_name(self):
+        self.assertEqual(zone_from_dataset("NO1_clean_load-windsolar"), "NO1")
+        self.assertEqual(zone_from_dataset("DK1_clean_load-windsolar-hydro"), "DK1")
 
 
 class TestRunDirSelection(unittest.TestCase):

@@ -42,6 +42,9 @@ HOURS = [f"h{h}" for h in range(24)]
 
 ENSEMBLE = "ensemble"
 
+# The deliverable: the ensemble forecast and the observed price, hour by hour.
+PREDICTIONS_FILE = "predictions.csv"
+
 
 def load_forecasts(run_dir):
     """Every per-window forecast file in a run directory, keyed by window."""
@@ -188,7 +191,41 @@ def compare(real, better, worse):
     return out
 
 
-def evaluate_run(run_dir, dataset=None, datasets_dir=None, quiet=False):
+def hourly_predictions(ensemble, real, zone):
+    """One row per hour: the LEAR forecast and the price that actually cleared.
+
+    This is the output of a run as far as anything downstream is concerned. The
+    per-window files are working state -- they exist so a run can resume, and so
+    the ensemble can be rebuilt -- but the forecast the paper reports, and the one
+    to plot or to test a later model against, is the ensemble mean.
+
+    Timestamps are naive local time for the zone, matching the dataset CSV the
+    forecasts were made from. Local time is what the market trades on, and it is
+    what makes hour 0..23 line up with the model's own hour index; it does mean
+    the autumn fall-back hour appears once rather than twice, and that the
+    spring-forward hour is absent with no observed price against it.
+    """
+    days = ensemble.index
+    offsets = pd.to_timedelta(np.arange(24), unit="h").to_numpy()
+    stamps = (days.to_numpy()[:, None] + offsets[None, :]).reshape(-1)
+
+    frame = pd.DataFrame({
+        "timestamp_local": stamps,
+        "zone": zone,
+        "forecast": ensemble.to_numpy(dtype=float).reshape(-1),
+        "observed": real.to_numpy(dtype=float).reshape(-1),
+    })
+    # NaN in `observed` is a genuinely unpublished price and is left as it is:
+    # filling it would put an invented number next to a real forecast.
+    return frame.sort_values("timestamp_local").reset_index(drop=True)
+
+
+def zone_from_dataset(dataset):
+    """``NO1_clean_load-windsolar`` -> ``NO1``."""
+    return dataset.split("_", 1)[0]
+
+
+def evaluate_run(run_dir, dataset=None, datasets_dir=None, quiet=False, zone=None):
     """Score one run directory. Returns a dict; also writes ``evaluation.json``."""
     manifest_path = os.path.join(run_dir, "run_metadata.json")
     manifest = {}
@@ -258,6 +295,13 @@ def evaluate_run(run_dir, dataset=None, datasets_dir=None, quiet=False):
             results["tests"][f"{ENSEMBLE}_vs_cw{window}"] = compare(
                 real.loc[days], ensemble.loc[days], frame.loc[days, HOURS])
 
+    predictions = hourly_predictions(ensemble, real, zone or zone_from_dataset(dataset))
+    predictions_path = os.path.join(run_dir, PREDICTIONS_FILE)
+    predictions.to_csv(predictions_path, index=False,
+                       date_format="%Y-%m-%dT%H:%M:%S")
+    results["predictions"] = predictions_path
+    results["predicted_hours"] = len(predictions)
+
     with open(os.path.join(run_dir, "evaluation.json"), "w", encoding="utf-8") as handle:
         json.dump(results, handle, indent=2)
 
@@ -287,6 +331,10 @@ def format_run(results):
             dm = "n/a" if values.get("dm") is None else f"{values['dm']:.4f}"
             gw = "n/a" if values.get("gw") is None else f"{values['gw']:.4f}"
             lines.append(f"  {name:>22}  {dm:>8}  {gw:>8}")
+
+    if results.get("predictions"):
+        lines.append(f"  {results['predicted_hours']:,} hourly predictions: "
+                     f"{results['predictions']}")
     return "\n".join(lines)
 
 
