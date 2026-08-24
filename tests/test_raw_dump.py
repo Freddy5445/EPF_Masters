@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from entsoe_tp.parser import parse_document  # noqa: E402
 from entsoe_tp.raw_dump import (  # noqa: E402
     COLUMNS, DEFAULT_ZONES, _queries, _shape, combine_parts,
+    variables_in_part,
 )
 
 NS = 'xmlns="urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:3"'
@@ -170,6 +171,72 @@ class TestZonesAndQueries(unittest.TestCase):
         self.assertEqual(len(shaped), 3)
         deltas = shaped["timestamp_utc"].diff().dropna().unique()
         self.assertEqual(list(deltas), [pd.Timedelta(days=7)])
+
+
+class TestResumeIsPerSeries(unittest.TestCase):
+    """A part written before a data item existed is incomplete, not stale.
+
+    Resuming by zone would skip it entirely and never fetch the new series;
+    rebuilding it would re-fetch the three already downloaded. Neither is what
+    "add the missing series" means, so resume works per data item.
+    """
+
+    def part(self, tmp, variables):
+        from entsoe_tp.raw_dump import _write_part
+
+        frames = []
+        for variable in variables:
+            frame = parse_document(
+                price_document("2020-01-06T00:00Z", "2020-01-06T02:00Z",
+                               "PT60M", 2),
+                "price.amount", expect_resolution=None)
+            frames.append(_shape(frame, "NO2", "EIC", variable,
+                                 {"documentType": "A44"}))
+        path = os.path.join(tmp, "NO2.parquet")
+        _write_part(pd.concat(frames, ignore_index=True), path)
+        return path
+
+    def test_reports_which_series_a_part_holds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.part(tmp, ["price", "load_forecast"])
+            self.assertEqual(variables_in_part(path),
+                             {"price", "load_forecast"})
+
+    def test_a_missing_part_holds_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(variables_in_part(os.path.join(tmp, "nope.parquet")),
+                             set())
+
+    def test_the_new_series_is_identified_as_missing(self):
+        """The case that matters: a part built before reservoir existed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.part(tmp, ["price", "load_forecast",
+                                   "generation_forecast"])
+            have = variables_in_part(path)
+            missing = [v for v in _queries("x") if v not in have]
+            self.assertEqual(missing, ["reservoir"])
+
+    def test_a_complete_part_leaves_nothing_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.part(tmp, list(_queries("x")))
+            have = variables_in_part(path)
+            self.assertEqual([v for v in _queries("x") if v not in have], [])
+
+    def test_fetch_zone_can_be_limited_to_one_series(self):
+        from entsoe_tp.raw_dump import fetch_zone
+
+        calls = []
+
+        class Client:
+            def fetch(self, params, start, end, progress=None):
+                calls.append(params["documentType"])
+                return []
+
+        fetch_zone(Client(), "NO2", pd.Timestamp("2020-01-01", tz="UTC"),
+                   pd.Timestamp("2020-01-02", tz="UTC"),
+                   variables=["reservoir"], quiet=True)
+
+        self.assertEqual(calls, ["A72"])
 
 
 class TestCombineParts(unittest.TestCase):
