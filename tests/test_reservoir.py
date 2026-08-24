@@ -18,8 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from entsoe_tp.areas import lookup  # noqa: E402
 from entsoe_tp.build_dataset import (  # noqa: E402
-    RESERVOIR_PERIOD, _column_cache_path, _column_specs, _load_cached_column,
-    _store_cached_column,
+    RESERVOIR_PERIOD, _column_cache_path, _column_specs, _first_non_hourly,
+    _load_cached_column, _store_cached_column,
 )
 from entsoe_tp.hourly import GridError, to_local_hourly_step  # noqa: E402
 
@@ -119,6 +119,55 @@ class TestReservoirColumnWiring(unittest.TestCase):
         queries, _ = _column_specs(area, "load-wind-solar", include_reservoir=True)
         self.assertIsNone(queries["reservoir"][2])
         self.assertEqual(queries["price"][2], "PT60M")
+
+
+class TestResolutionBoundaryIsMeasured(unittest.TestCase):
+    """Where the hourly era ends differs by zone, so it cannot be a constant.
+
+    DK1 left hourly resolution in April 2025 and NO2 in February -- both well
+    before the EU-wide deadline of 2025-10-01. A hardcoded date therefore points
+    at the wrong end of the range.
+    """
+
+    def frame(self, switch_at):
+        """A parsed frame that is hourly up to ``switch_at``, then 15-minute."""
+        hourly = pd.date_range(pd.Timestamp("2025-02-01", tz="UTC"), switch_at,
+                               freq="h", inclusive="left")
+        quarter = pd.date_range(switch_at, periods=96, freq="15min", tz="UTC")
+        return pd.DataFrame({
+            "timestamp": list(hourly) + list(quarter),
+            "value": 1.0,
+            "resolution": ["PT60M"] * len(hourly) + ["PT15M"] * len(quarter),
+        })
+
+    def test_finds_the_first_non_hourly_timestamp(self):
+        switch = pd.Timestamp("2025-02-20 23:00", tz="UTC")
+        self.assertEqual(_first_non_hourly(self.frame(switch)), switch)
+
+    def test_returns_none_when_wholly_hourly(self):
+        frame = self.frame(pd.Timestamp("2025-02-20 23:00", tz="UTC"))
+        frame = frame[frame["resolution"] == "PT60M"]
+        self.assertIsNone(_first_non_hourly(frame))
+
+    def test_returns_none_for_an_empty_frame(self):
+        self.assertIsNone(_first_non_hourly(pd.DataFrame()))
+
+    def test_last_hourly_day_is_the_day_before_the_change(self):
+        """NO2: 2025-02-20 23:00 UTC is local midnight, so the 20th is the last
+        complete hourly day."""
+        switch = pd.Timestamp("2025-02-20 23:00", tz="UTC")
+        local = switch.tz_convert("Europe/Oslo").tz_localize(None)
+        last_hourly_day = local.normalize() - pd.Timedelta(days=1)
+        self.assertEqual(last_hourly_day, pd.Timestamp("2025-02-20"))
+
+    def test_switchover_constant_is_not_used_to_decide_anything(self):
+        """It is kept only as a reference point, never as a boundary."""
+        import inspect
+
+        from entsoe_tp import build_dataset
+
+        source = inspect.getsource(build_dataset.build)
+        self.assertNotIn("MTU_SWITCHOVER", source)
 
 
 class TestColumnCache(unittest.TestCase):

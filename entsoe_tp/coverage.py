@@ -213,8 +213,10 @@ def main(argv=None):
         print(f"\n  Smallest --max-gap that covers them: {longest}")
 
     if end_date >= MTU_SWITCHOVER:
-        print(f"\nNote: --end is at or past {MTU_SWITCHOVER.date()}, the nominal "
-              f"15-minute switchover. Zones vary; DK1 switched earlier.")
+        print(f"\nNote: --end is at or past {MTU_SWITCHOVER.date()}, the EU-wide "
+              f"deadline for the 15-minute market time unit. Zones switched well "
+              f"before it and on different dates (DK1 in April 2025, NO2 in "
+              f"February), so check the resolutions reported above per series.")
 
     return 0
 

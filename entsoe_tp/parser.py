@@ -141,10 +141,14 @@ def _expand_period(period, value_tag, expect_resolution):
 
     raw_resolution = _findtext(period, "resolution")
     if expect_resolution is not None and raw_resolution != expect_resolution:
+        # Deliberately no date here. Zones moved to 15-minute market time units
+        # on different dates -- DK1 in April 2025, NO2 in February -- so naming
+        # one sends the reader to the wrong end of the range. The period that
+        # actually changed is the useful fact.
         raise UnexpectedResolution(
             f"Period {start}/{end} has resolution {raw_resolution!r}, expected "
-            f"{expect_resolution!r}. Day-ahead data moved to 15-minute market time "
-            f"units from 2025-10-01; restrict the range or aggregate before use."
+            f"{expect_resolution!r}. This zone's market time unit changes within "
+            f"the requested range; end the range before {start}, or aggregate."
         )
 
     try:
