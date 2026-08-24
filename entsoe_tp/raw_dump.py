@@ -155,8 +155,27 @@ def _shape(frame, zone, eic, variable, params):
     return out[COLUMNS]
 
 
-def fetch_zone(client, zone, start_utc, end_utc, quiet=False):
-    """Fetch all three data items for one zone.
+def variables_in_part(path):
+    """Which data items an existing per-zone part already holds.
+
+    Resume has to be per *series*, not per zone. A part written before a data
+    item existed is not stale -- it is incomplete -- so the zone must be revisited
+    for the missing item alone rather than skipped or rebuilt from scratch.
+    """
+    if not os.path.exists(path):
+        return set()
+    try:
+        existing = pd.read_parquet(path, columns=["variable"])
+    except (OSError, ValueError):
+        return set()
+    return set(existing["variable"].astype("string").dropna().unique())
+
+
+def fetch_zone(client, zone, start_utc, end_utc, variables=None, quiet=False):
+    """Fetch the requested data items for one zone.
+
+    ``variables`` limits the fetch to particular items, so a zone whose part is
+    missing only one series costs one query rather than four.
 
     Returns ``(frame, manifest_rows)``. A failure for one data item is recorded
     and the others still run: the point of the dump is to find out what is
@@ -166,7 +185,11 @@ def fetch_zone(client, zone, start_utc, end_utc, quiet=False):
     frames = []
     manifest = []
 
-    for variable, spec in _queries(area.eic).items():
+    wanted = _queries(area.eic)
+    if variables is not None:
+        wanted = {k: v for k, v in wanted.items() if k in variables}
+
+    for variable, spec in wanted.items():
         started = time.time()
         record = {
             "zone": zone, "eic": area.eic, "variable": variable,
@@ -328,21 +351,47 @@ def main(argv=None):
         part_path = os.path.join(parts_dir, f"{zone}.parquet")
         manifest_path = os.path.join(parts_dir, f"{zone}.manifest.json")
 
-        if os.path.exists(part_path) and not args.refresh:
-            print(f"[{number}/{len(zones)}] {zone}: already dumped, skipping")
-            if os.path.exists(manifest_path):
-                with open(manifest_path, encoding="utf-8") as handle:
-                    manifest.extend(json.load(handle))
+        all_variables = list(_queries("x"))
+        have = set() if args.refresh else variables_in_part(part_path)
+        missing = [v for v in all_variables if v not in have]
+
+        previous_manifest = []
+        if os.path.exists(manifest_path) and not args.refresh:
+            with open(manifest_path, encoding="utf-8") as handle:
+                previous_manifest = json.load(handle)
+            # A data item recorded as returning nothing was still asked for, so
+            # it is answered, not missing.
+            answered = {row["variable"] for row in previous_manifest}
+            missing = [v for v in all_variables if v not in have and v not in answered]
+
+        if not missing:
+            print(f"[{number}/{len(zones)}] {zone}: all {len(all_variables)} "
+                  f"data items present, skipping")
+            manifest.extend(previous_manifest)
             continue
 
-        print(f"[{number}/{len(zones)}] {zone}")
+        if have or previous_manifest:
+            print(f"[{number}/{len(zones)}] {zone}: adding {', '.join(missing)} "
+                  f"to an existing part")
+        else:
+            print(f"[{number}/{len(zones)}] {zone}")
+
         frame, zone_manifest = fetch_zone(client, zone, start_utc, end_utc,
-                                          quiet=args.quiet)
+                                          variables=missing, quiet=args.quiet)
+
+        # Merge rather than replace, so the series already downloaded are neither
+        # re-fetched nor lost.
+        if os.path.exists(part_path) and not args.refresh:
+            existing = pd.read_parquet(part_path)
+            frame = pd.concat([existing, frame], ignore_index=True)
         _write_part(frame, part_path)
+
+        zone_manifest = [row for row in previous_manifest
+                         if row["variable"] not in missing] + zone_manifest
         with open(manifest_path, "w", encoding="utf-8") as handle:
             json.dump(zone_manifest, handle, indent=2)
         manifest.extend(zone_manifest)
-        print(f"    -> {len(frame):,} rows\n")
+        print(f"    -> {len(frame):,} rows in the part\n")
 
     part_paths = [os.path.join(parts_dir, f"{z}.parquet") for z in zones]
     part_paths = [p for p in part_paths if os.path.exists(p)]

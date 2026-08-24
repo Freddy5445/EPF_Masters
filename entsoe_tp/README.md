@@ -170,8 +170,19 @@ one row per observation, carrying `resolution`, `psr_type`, `curve_type`,
 `*_manifest.csv` recording per zone and data item what was returned, which
 resolutions appeared, and what failed.
 
-Per-zone parts are written under `<out>.parts/`, so an interrupted run resumes
-by zone; pass `--refresh` to re-fetch. Needs `pyarrow`.
+Per-zone parts are written under `<out>.parts/`, and **resume works per data
+item, not per zone**: a part written before a data item existed is incomplete
+rather than stale, so a plain re-run fetches only what is missing and merges it
+into the existing part. Adding the reservoir series to a dump that already has
+the other three therefore costs one query per zone, not four:
+
+```
+[1/15] DK1: adding reservoir to an existing part
+[2/15] DK2: adding reservoir to an existing part
+```
+
+A zone that already holds every data item is skipped. Pass `--refresh` to
+re-fetch a zone from scratch. Needs `pyarrow`.
 
 The full run is roughly 5,800 requests and several million observations — expect
 tens of minutes on a cold cache.
