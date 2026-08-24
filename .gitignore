@@ -20,3 +20,12 @@ experiments/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Parquet files
+*.parquet
+
+
+
+resolution_transitions.md
+
+*.manifest.json
