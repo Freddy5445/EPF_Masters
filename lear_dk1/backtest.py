@@ -115,9 +115,10 @@ def run_window(df_train, df_test, calibration_window, run_dir, run_id,
     minimum = minimum_calibration_window(n_exogenous)
     if calibration_window < minimum:
         raise ValueError(
-            f"calibration_window={calibration_window} is too small for a dataset "
-            f"with {n_exogenous} exogenous inputs ({n_feat} features). LassoLarsIC "
-            f"needs more samples than features; use at least {minimum} days."
+            f"calibration_window={calibration_window} is below the {minimum}-day "
+            f"floor. Lago et al. (2021) take 8 weeks as the shortest window LEAR is "
+            f"run on; below that there is too little data to identify "
+            f"{n_feat} features however lambda is chosen."
         )
 
     # sklearn's own NaN message names estimators and imputer pipelines, which

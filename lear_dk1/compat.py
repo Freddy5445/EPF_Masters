@@ -131,10 +131,26 @@ class LEARCompat(_LEAR):
 
         self.models = {}
         for h in range(24):
-            # Estimate lambda with LARS, then refit with standard LASSO, as
-            # upstream does.
-            param = LassoLarsIC(criterion="aic", max_iter=2500) \
-                .fit(Xtrain, Ytrain[:, h]).alpha_
+            # Estimate lambda with LARS under an AIC criterion, then refit with
+            # coordinate-descent LASSO at that lambda, as upstream does.
+            #
+            # noise_variance is supplied rather than left to scikit-learn. Its
+            # default estimator is an OLS residual variance, which needs more
+            # samples than features and so refuses outright on the paper's 8-
+            # and 12-week windows (49 and 77 samples against 247 regressors).
+            # Passing the variance of the target restores the behaviour LEAR
+            # was written against and makes those windows fitable.
+            #
+            # This is not confined to the short windows. AIC here is
+            # ``n log(2 pi s2) + RSS/s2 + 2 df``: the first term is flat along
+            # the path, but s2 sets how RSS trades against sparsity, so it moves
+            # the argmin at every window length. Measured on synthetic data,
+            # alpha roughly doubles at n=1092. Results are therefore not
+            # comparable with runs made before this change.
+            param = LassoLarsIC(
+                criterion="aic", max_iter=2500,
+                noise_variance=float(np.var(Ytrain[:, h])),
+            ).fit(Xtrain, Ytrain[:, h]).alpha_
             model = Lasso(max_iter=2500, alpha=param)
             model.fit(Xtrain, Ytrain[:, h])
             self.models[h] = model
@@ -162,16 +178,21 @@ def n_features(n_exogenous):
     return 96 + 7 + 72 * n_exogenous
 
 
-def minimum_calibration_window(n_exogenous):
-    """Smallest calibration window (days) that ``LassoLarsIC`` will accept.
+# Lago et al. (2021) take 8 weeks as the shortest window LEAR is run on. Below
+# that there is too little data to identify the model however lambda is chosen,
+# so it is a modelling floor rather than a numerical one.
+MINIMUM_WINDOW_DAYS = 56
 
-    ``LassoLarsIC`` refuses to fit when there are fewer samples than features,
-    because it cannot estimate the noise variance. One training sample is one
-    day, and the first week is consumed building lagged features, so the window
-    must exceed ``n_features + 7``. A little headroom is added because the
-    estimator needs strictly more samples than features, not merely equal.
 
-    Note this rules out the 56- and 84-day windows used by the original LEAR
-    ensemble: with even one exogenous input the model has 175 features.
+def minimum_calibration_window(n_exogenous=None):
+    """Shortest calibration window (days) LEAR is run on.
+
+    This used to be ``n_features + 8``, because scikit-learn's ``LassoLarsIC``
+    refuses to fit when samples are fewer than features -- which ruled out the
+    8- and 12-week windows of the published ensemble. Supplying the noise
+    variance explicitly (see :meth:`LEARCompat.recalibrate`) removes that
+    restriction, so the binding constraint is now the paper's own floor.
+
+    ``n_exogenous`` is accepted and ignored, so existing callers keep working.
     """
-    return n_features(n_exogenous) + 8
+    return MINIMUM_WINDOW_DAYS
