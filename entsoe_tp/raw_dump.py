@@ -361,7 +361,12 @@ def main(argv=None):
                 previous_manifest = json.load(handle)
             # A data item recorded as returning nothing was still asked for, so
             # it is answered, not missing.
-            answered = {row["variable"] for row in previous_manifest}
+            # Only a row without an error counts as answered. A variable that
+            # failed still has a manifest row, so counting it here would make a
+            # re-run skip it and leave --refresh -- which re-downloads every
+            # variable for every zone -- as the only way to retry.
+            answered = {row["variable"] for row in previous_manifest
+                        if not row.get("error")}
             missing = [v for v in all_variables if v not in have and v not in answered]
 
         if not missing:
