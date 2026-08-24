@@ -100,6 +100,64 @@ class TestResolution(unittest.TestCase):
         self.assertEqual(len(series), 96)
 
 
+class TestSlotCountAcrossDstTransition(unittest.TestCase):
+    """A period's bounds are UTC, but its slot count is in market time.
+
+    A DST transition inside a period leaves the two an hour apart, so flooring
+    the quotient undercounts the slots and rejects a valid document. Weekly
+    reservoir data is where this shows: it made 12 of 15 zones fail to parse.
+    """
+
+    def test_weekly_period_spanning_spring_forward_parses(self):
+        # The exact period the reservoir dump failed on. Five weekly slots, but
+        # only 34d23h of UTC because clocks went forward on 2016-03-27, so the
+        # declared position 5 exceeded the floored slot count of 4.
+        document = price_document(
+            [(1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0), (5, 50.0)],
+            resolution="P7D",
+            start="2016-02-28T23:00Z", end="2016-04-03T22:00Z",
+        )
+
+        frame = parse_document(document, "price.amount", expect_resolution=None)
+
+        self.assertEqual(len(frame), 5)
+        self.assertEqual(list(frame["value"]), [10.0, 20.0, 30.0, 40.0, 50.0])
+        self.assertEqual(list(frame["resolution"].unique()), ["P7D"])
+
+    def test_the_last_weekly_slot_is_no_longer_dropped(self):
+        """Before the fix this raised; the fifth week is the one at stake."""
+        document = price_document(
+            [(1, 10.0), (5, 50.0)], resolution="P7D",
+            start="2016-02-28T23:00Z", end="2016-04-03T22:00Z",
+        )
+        frame = parse_document(document, "price.amount", expect_resolution=None)
+
+        # A03 carries 10.0 across weeks 2-4, then week 5 publishes 50.0.
+        self.assertEqual(list(frame["value"]), [10.0, 10.0, 10.0, 10.0, 50.0])
+
+    def test_the_period_really_is_short_of_five_whole_weeks(self):
+        """Guards the premise: without the rounding this input would floor to 4."""
+        span = pd.Timestamp("2016-04-03T22:00Z") - pd.Timestamp("2016-02-28T23:00Z")
+        self.assertEqual(span, pd.Timedelta(days=34, hours=23))
+        self.assertEqual(int(span / pd.Timedelta(days=7)), 4)
+        self.assertEqual(round(span / pd.Timedelta(days=7)), 5)
+
+    def test_hourly_slot_counts_are_unchanged(self):
+        """The quotient is exact at PT60M, so rounding must not alter anything."""
+        document = price_document([(1, 10.0)],
+                                  start="2016-01-01T23:00Z",
+                                  end="2016-01-02T23:00Z")
+        self.assertEqual(len(parse_document(document, "price.amount")), 24)
+
+    def test_a_period_overdeclaring_by_more_than_one_still_raises(self):
+        """Rounding absorbs the DST hour, not genuine corruption."""
+        document = price_document([(30, 1.0)], resolution="P7D",
+                                  start="2016-02-28T23:00Z",
+                                  end="2016-04-03T22:00Z")
+        with self.assertRaises(TransparencyError):
+            parse_document(document, "price.amount", expect_resolution=None)
+
+
 class TestAcknowledgement(unittest.TestCase):
     def test_no_matching_data_is_empty_not_an_error(self):
         doc = ACKNOWLEDGEMENT.format(code="999", text="No matching data found")

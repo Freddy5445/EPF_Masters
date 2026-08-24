@@ -169,7 +169,21 @@ def _expand_period(period, value_tag, expect_resolution):
     if not points:
         return []
 
-    n_slots = int((end - start) / step)
+    # Round rather than floor. A period is a whole number of *market* slots, but
+    # its bounds are UTC, and a DST transition inside the period makes those
+    # bounds an hour short of (or long for) the slot count. A weekly series is
+    # where this bites: 2016-02-28T23:00Z/2016-04-03T22:00Z is five weekly slots
+    # but only 34d23h of UTC, so flooring gives 4 and rejects a valid document.
+    # For PT15M and PT60M the quotient is exact, so nothing changes there.
+    #
+    # The trade: a genuinely malformed period that overdeclares by a single
+    # position is now accepted rather than rejected. Worth it -- a spring-forward
+    # false positive is certain and recurring, this is neither.
+    #
+    # Known and accepted: the timestamps below step in UTC too, so weekly stamps
+    # after a transition sit an hour off local midnight. For a weekly stock
+    # series that is noise, and it is left alone deliberately.
+    n_slots = round((end - start) / step)
     highest = max(points)
     if highest > n_slots:
         raise TransparencyError(
