@@ -28,10 +28,26 @@ The output is one long/tidy Parquet file: one row per observation, with the
 document and TimeSeries metadata carried alongside so that changes in
 ``curveType``, ``businessType`` or unit are visible rather than lost.
 
+Four data items are captured per zone:
+
+===================  ==========================================  ===========
+``variable``         Data item                                   Query
+===================  ==========================================  ===========
+price                Day-ahead prices [12.1.D]                   ``A44``
+load_forecast        Day-ahead total load forecast [6.1.B]       ``A65``/``A01``
+generation_forecast  Day-ahead wind & solar forecast [14.1.D]    ``A69``/``A01``
+reservoir            Water reservoirs & hydro storage [16.1.D]   ``A72``/``A16``
+===================  ==========================================  ===========
+
 The A69 document is specifically the *wind and solar* generation forecast, so
 its production types are whichever of solar (B16), wind onshore (B19) and wind
 offshore (B18) a zone publishes. Nothing is filtered: unexpected codes are
 recorded rather than dropped.
+
+The reservoir series is weekly (``P7D``) rather than hourly, which needs no
+special handling: its resolution is recorded per observation like any other, and
+nothing is resampled or aligned to it. Zones with no hydro storage return
+nothing and the manifest says so.
 
 Requires ``pyarrow`` (see requirements.txt).
 """
@@ -81,6 +97,16 @@ def _queries(eic):
         },
         "generation_forecast": {
             "params": {"documentType": "A69", "processType": "A01",
+                       "in_Domain": eic},
+            "value_tag": "quantity",
+        },
+        # Water Reservoirs and Hydro Storage Plants [16.1.D]. Published weekly
+        # (P7D) rather than hourly, which needs no special handling here: the
+        # resolution is recorded per observation like any other, and nothing is
+        # resampled or aligned. Zones without hydro storage simply return
+        # nothing, which the manifest records.
+        "reservoir": {
+            "params": {"documentType": "A72", "processType": "A16",
                        "in_Domain": eic},
             "value_tag": "quantity",
         },
