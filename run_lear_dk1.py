@@ -27,6 +27,7 @@ writes forecasts, per-day timings and a JSON manifest under experiments/.
 """
 
 import argparse
+import glob
 import os
 import sys
 
@@ -124,10 +125,27 @@ def main(argv=None):
               f"{end_test.date()}", file=sys.stderr)
         return 1
 
-    run_name = args.run_name or (
-        f"{args.dataset}_{begin_test.date()}_{end_test.date()}"
-        + ("_smoke" if args.smoke else "")
-    )
+    run_name = args.run_name or f"{args.dataset}_{begin_test.date()}_{end_test.date()}"
+
+    if args.smoke:
+        # A smoke run exists to exercise the fitting path, so it must never resume: a
+        # previous run of the same ten days would be skipped day by day and report a
+        # 0:00:00 "success" that proves nothing about the pipeline it was meant to check.
+        #
+        # The suffix is forced on even when --run-name was given, so a smoke run can only
+        # ever discard checkpoints from a directory that a smoke run created. Only the
+        # per-window checkpoints go; run_metadata.json is rewritten by the run itself.
+        if not run_name.endswith("_smoke"):
+            run_name += "_smoke"
+        stale = sorted(
+            glob.glob(os.path.join(args.out_dir, run_name, "forecasts_cw*.csv"))
+            + glob.glob(os.path.join(args.out_dir, run_name, "timings_cw*.csv"))
+        )
+        for path in stale:
+            os.remove(path)
+        if stale:
+            print(f"Discarded {len(stale)} checkpoint file(s) from an earlier smoke run "
+                  f"in {run_name}; starting from scratch.\n")
 
     # read_data wants the test range as full days: 00:00 through 23:00.
     #

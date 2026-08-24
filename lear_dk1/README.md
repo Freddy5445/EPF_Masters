@@ -39,7 +39,7 @@ python run_lear_dk1.py
 | `--max-linear` | Longest gap filled by interpolation, in hours (default 3) |
 | `--no-impute` | Fail on missing values instead of filling them |
 | `--run-name` | Run directory name — **reuse it to resume** |
-| `--smoke` | Ten days on the smallest window, into a separate directory |
+| `--smoke` | Ten days on the smallest window, into a separate `_smoke` directory. Never resumes: any earlier smoke checkpoint is discarded so the fitting path is actually exercised |
 
 The end date defaults to 2025-04-07 because DK1 day-ahead moved to 15-minute
 market time units on 2025-04-08, and the start to 2015-01-07 because ENTSO-E
