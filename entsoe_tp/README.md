@@ -74,8 +74,51 @@ both columns come from one query that is fetched once and split afterwards. If a
 zone does not publish a requested production type the build fails loudly rather
 than emitting a column of zeros.
 
+`--include-reservoir` appends a further column from Water Reservoirs and Hydro
+Storage Plants [16.1.D] (`A72` + `processType=A16`):
+
+| Output column | Data item | Query |
+|---|---|---|
+| last | Weekly stored energy | `A72` + `processType=A16` |
+
+Two things make this column different from the others. It is **weekly**, not
+hourly, and it is a **stock** (a level) rather than a flow. It is therefore held
+constant between publications rather than interpolated — interpolating would
+invent a trajectory the data does not contain, and would read from the *next*
+observation, which is future information.
+
+It is also delayed: a value covering a week cannot be known before that week has
+ended, so each observation only influences the grid from 7 days after the period
+it describes. `--reservoir-lag-days` adds more on top, to model the platform's
+own reporting delay. Hours before the first available publication stay empty
+rather than being back-filled.
+
 Note the exogenous count drives LEAR's feature count (`96 + 7 + 72·n`), which in
 turn sets the shortest usable calibration window — see `lear_dk1/README.md`.
+**Adding the reservoir to the 3-exogenous layout makes 4, so 391 features and a
+minimum window of about 399 days**, which rules out the 364-day window in the
+default LEAR ensemble.
+
+## Re-running only downloads what is missing
+
+Two caches make adding a column cheap:
+
+- **Raw XML** is keyed on request parameters, so adding a data item fetches only
+  that item; the others are served from `.cache/entsoe/`.
+- **Finished columns** are cached under `.cache/entsoe/columns/`, keyed on
+  everything that shapes them — zone, query, date range, aggregation, production
+  types, gap handling and reservoir lag. Adding one column to an existing
+  dataset therefore costs one download and one parse, instead of re-deriving
+  every column from a decade of cached XML.
+
+So this re-uses four columns and downloads only `A72`:
+
+```
+python -m entsoe_tp.build_dataset --zone NO2 --start 2016-01-01 --end 2025-04-07 --exog load-wind-solar --include-reservoir
+```
+
+Pass `--refresh-columns` to recompute columns from cached XML, or `--no-cache`
+to re-download everything.
 
 Both exogenous series are *forecasts* published day-ahead, so they are genuinely
 available when a day-ahead price forecast has to be made. Realised load and generation

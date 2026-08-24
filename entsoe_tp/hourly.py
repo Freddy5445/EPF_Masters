@@ -105,6 +105,60 @@ def to_local_hourly_grid(series_utc, tz, start_date, end_date, max_gap=3,
 
 
 
+def to_local_hourly_step(series_utc, tz, start_date, end_date,
+                         available_after=pd.Timedelta(days=7), allow_gaps=False):
+    """Place a coarse *stock* series onto the hourly grid as a step function.
+
+    Water reservoir filling [16.1.D] is published weekly, and is a stock rather
+    than a flow: a level, not a rate. Two things follow.
+
+    First, it must be held constant between publications, not interpolated.
+    Interpolating would invent a smooth trajectory the data does not contain --
+    and, worse, would read from the *next* observation, which is future
+    information.
+
+    Second, an observation covering a week cannot be known before that week is
+    over. ``available_after`` shifts each observation forward by that much
+    before it is allowed to influence the grid, so hours only ever see levels
+    that had actually been published by then. It defaults to the ``P7D``
+    publication period; add more to model the platform's own reporting delay.
+
+    Hours before the first available observation are left as NaN: there is no
+    earlier level to carry forward, and back-filling would be look-ahead.
+    """
+    if series_utc.empty:
+        raise GridError("No data returned for the requested range")
+
+    # Delay availability, then move to the naive local grid.
+    delayed = series_utc.copy()
+    delayed.index = delayed.index + available_after
+
+    local = delayed.tz_convert(tz).tz_localize(None)
+    local = local.groupby(level=0).mean().sort_index()
+
+    grid = pd.date_range(
+        pd.Timestamp(start_date).normalize(),
+        pd.Timestamp(end_date).normalize() + pd.Timedelta(hours=23),
+        freq="h",
+    )
+
+    # Carry each level forward to every hour until the next publication. Union
+    # first so observations landing between grid points are not lost, then
+    # forward-fill and drop back to the grid. ffill only -- never bfill.
+    combined = local.reindex(local.index.union(grid)).sort_index().ffill()
+    stepped = combined.reindex(grid)
+
+    if stepped.isna().any() and not allow_gaps:
+        missing = stepped.index[stepped.isna()]
+        raise GridError(
+            f"{len(missing)} hour(s) precede the first published value that is "
+            f"available by then (first {missing[0]}, last {missing[-1]}). Start "
+            f"the range later, or widen it so an earlier publication exists."
+        )
+
+    return stepped
+
+
 def _check_gap_lengths(gap_index, max_gap):
     """Raise if any run of consecutive missing hours exceeds ``max_gap``."""
     run_start = previous = gap_index[0]

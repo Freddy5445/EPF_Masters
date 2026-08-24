@@ -33,10 +33,22 @@ Day-ahead solar forecast (MW)               Solar [14.1.D]             ``A69``, 
 The A69 document carries one TimeSeries per production type, so both renewable
 columns come from a single query that is fetched once and split afterwards.
 
+``--include-reservoir`` appends Water Reservoirs and Hydro Storage Plants
+[16.1.D] (``A72`` + ``processType=A16``) as a further column. It is published
+weekly and is a *stock* rather than a flow, so it is held constant between
+publications rather than interpolated, and each value only takes effect once the
+week it describes has ended -- interpolating or applying it sooner would use
+information that was not yet available.
+
 Note that the exogenous count drives the LEAR feature count
 (``96 + 7 + 72 * n_exogenous``), and ``LassoLarsIC`` requires more training
 samples than features -- so a 3-exogenous dataset (319 features) cannot be
-calibrated on windows shorter than roughly a year.
+calibrated on windows shorter than roughly a year, and adding the reservoir
+column (391 features) pushes that minimum to about 399 days.
+
+Re-running is incremental. Raw XML is cached per request, and finished columns
+are cached under ``.cache/entsoe/columns/``, so adding a column to an existing
+dataset downloads and parses only that column.
 
 Both exogenous series are day-ahead *forecasts*, so they are genuinely available
 at the time a day-ahead price forecast has to be made. Realised load and
@@ -49,6 +61,8 @@ data to the model.
 """
 
 import argparse
+import hashlib
+import json
 import os
 import sys
 
@@ -56,7 +70,9 @@ import pandas as pd
 
 from .areas import lookup
 from .client import TransparencyClient
-from .hourly import GridError, assert_epftoolbox_grid, to_local_hourly_grid
+from .hourly import (
+    GridError, assert_epftoolbox_grid, to_local_hourly_grid, to_local_hourly_step,
+)
 from .parser import TransparencyError, parse_document, to_series, unit_label
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +92,11 @@ PSR_WIND_ONSHORE = "B19"
 
 EXOG_LAYOUTS = ("load-windsolar", "load-wind-solar")
 
+# Water Reservoirs and Hydro Storage Plants [16.1.D] is published *weekly* and
+# is a stock (stored energy) rather than a flow, so it is expanded onto the
+# hourly grid as a step function rather than aligned like the hourly series.
+RESERVOIR_PERIOD = pd.Timedelta(days=7)
+
 
 def _filter_psr(*codes):
     """Build a filter keeping only the given production types from an A69 frame."""
@@ -89,6 +110,10 @@ def _filter_psr(*codes):
                 f"{', '.join(codes)}. This zone may not publish them separately."
             )
         return kept
+
+    # Recorded so the column cache key distinguishes wind from solar; both are
+    # derived from the same query with the same aggregate.
+    filter_fn.psr_codes = list(codes)
     return filter_fn
 
 
@@ -112,7 +137,8 @@ def _filter_day_ahead(frame):
     return day_ahead if not day_ahead.empty else frame
 
 
-def _fetch_frame(client, params, value_tag, start_utc, end_utc, label, quiet=False):
+def _fetch_frame(client, params, value_tag, start_utc, end_utc, label,
+                 expect_resolution="PT60M", quiet=False):
     """Fetch one query's whole date range and return the combined tidy frame.
 
     Kept separate from column derivation so that a single query feeding several
@@ -124,7 +150,8 @@ def _fetch_frame(client, params, value_tag, start_utc, end_utc, label, quiet=Fal
 
     documents = client.fetch(params, start_utc, end_utc, progress=progress)
 
-    frames = [parse_document(doc, value_tag) for doc in documents]
+    frames = [parse_document(doc, value_tag, expect_resolution=expect_resolution)
+              for doc in documents]
     frames = [f for f in frames if not f.empty]
     if not frames:
         return pd.DataFrame()
@@ -159,7 +186,40 @@ def _with_unit(name, unit):
     return f"{name} ({unit})" if unit else name
 
 
-def _column_specs(area, exog):
+def _column_cache_path(cache_dir, zone, label, key):
+    """Where a finished column is cached, keyed by everything that shapes it.
+
+    Downloads are already incremental -- the raw-XML cache is keyed on request
+    parameters, so adding a data item re-fetches only that item. This caches the
+    *parsed and aligned* column as well, so adding one column to an existing
+    dataset costs one download and one parse rather than re-deriving every
+    column from a decade of cached XML.
+    """
+    material = json.dumps(key, sort_keys=True, default=str)
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    safe = "".join(c if c.isalnum() else "_" for c in label)[:40]
+    return os.path.join(cache_dir, "columns", f"{zone}_{safe}_{digest}.csv")
+
+
+def _load_cached_column(path):
+    """Return ``(series, label)`` from a cached column, or None.
+
+    The label is stored with the data because it carries the unit read from the
+    document, which is only known after a fetch. Without it a cached column
+    would come back named differently from a freshly built one.
+    """
+    if not os.path.exists(path):
+        return None
+    frame = pd.read_csv(path, index_col=0, parse_dates=True)
+    return frame.iloc[:, 0], frame.columns[0]
+
+
+def _store_cached_column(path, series, label):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    series.to_frame(label).to_csv(path, date_format="%Y-%m-%dT%H:%M:%S")
+
+
+def _column_specs(area, exog, include_reservoir=False):
     """Return (queries, columns) for the requested exogenous layout.
 
     ``queries`` maps a query key to (params, value_tag). ``columns`` is an
@@ -173,13 +233,20 @@ def _column_specs(area, exog):
     queries = {
         "price": ({"documentType": "A44",
                    "in_Domain": area.eic,
-                   "out_Domain": area.eic}, "price.amount"),
+                   "out_Domain": area.eic}, "price.amount", "PT60M"),
         "load": ({"documentType": "A65",
                   "processType": "A01",
-                  "outBiddingZone_Domain": area.eic}, "quantity"),
+                  "outBiddingZone_Domain": area.eic}, "quantity", "PT60M"),
         "renewables": ({"documentType": "A69",
                         "processType": "A01",
-                        "in_Domain": area.eic}, "quantity"),
+                        "in_Domain": area.eic}, "quantity", "PT60M"),
+        # Water Reservoirs and Hydro Storage Plants [16.1.D]: weekly stored
+        # energy. processType A16 is "realised".
+        # None: the weekly series is expanded as a step function, which does
+        # not depend on the resolution being any particular value.
+        "reservoir": ({"documentType": "A72",
+                       "processType": "A16",
+                       "in_Domain": area.eic}, "quantity", None),
     }
 
     columns = [
@@ -201,6 +268,12 @@ def _column_specs(area, exog):
             f"Unknown --exog layout {exog!r}. Choose one of: {', '.join(EXOG_LAYOUTS)}"
         )
 
+    if include_reservoir:
+        # Appended last so the existing columns keep their positions, which is
+        # what read_data binds on.
+        columns.append(("Water reservoir and hydro storage",
+                        "reservoir", "sum", None))
+
     # Drop any query no column actually needs.
     used = {key for _, key, _, _ in columns}
     queries = {k: v for k, v in queries.items() if k in used}
@@ -209,7 +282,8 @@ def _column_specs(area, exog):
 
 
 def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
-          exog="load-windsolar", allow_gaps=False, quiet=False):
+          exog="load-windsolar", allow_gaps=False, include_reservoir=False,
+          reservoir_lag_days=0, refresh_columns=False, quiet=False):
     """Fetch and assemble the dataset. Returns the finished DataFrame."""
     area = lookup(zone)
     start_date = pd.Timestamp(start).normalize()
@@ -235,30 +309,54 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
         print(f"Zone {area.code} ({area.name}, {area.eic}) in {area.tz}")
         print(f"Range {start_date.date()} to {end_date.date()} inclusive")
 
-    queries, column_specs = _column_specs(area, exog)
+    queries, column_specs = _column_specs(area, exog, include_reservoir)
 
-    # Fetch each distinct query once; wind and solar both derive from A69.
+    # Queries are fetched lazily, only when a column that needs one is not
+    # already cached. Adding a column to an existing dataset therefore downloads
+    # and parses just that column.
     raw = {}
-    for key, (params, value_tag) in queries.items():
-        raw[key] = _fetch_frame(client, params, value_tag,
-                                start_utc, end_utc, key, quiet)
-        if raw[key].empty:
-            raise ValueError(
-                f"The platform returned no data for {key!r} in zone {area.code}. "
-                f"Check that this zone publishes that data item for the requested range."
-            )
+    units = {}
 
-    # Label each column with the unit the document actually declares.
-    units = {
-        "price": _price_unit(raw.get("price", pd.DataFrame())),
-        "load": _quantity_unit(raw.get("load", pd.DataFrame())),
-        "renewables": _quantity_unit(raw.get("renewables", pd.DataFrame())),
-    }
+    def source(key):
+        if key not in raw:
+            params, value_tag, expect_resolution = queries[key]
+            raw[key] = _fetch_frame(client, params, value_tag,
+                                    start_utc, end_utc, key,
+                                    expect_resolution=expect_resolution,
+                                    quiet=quiet)
+            if raw[key].empty:
+                raise ValueError(
+                    f"The platform returned no data for {key!r} in zone "
+                    f"{area.code}. Check that this zone publishes that data item "
+                    f"for the requested range."
+                )
+            units[key] = (_price_unit(raw[key]) if key == "price"
+                          else _quantity_unit(raw[key]))
+        return raw[key]
 
     columns = {}
     for label, key, aggregate, filter_fn in column_specs:
-        label = _with_unit(label, units.get(key))
-        frame_for_column = raw[key]
+        cache_key = {
+            "eic": area.eic, "tz": area.tz, "label": label, "key": key,
+            "params": queries[key][0], "aggregate": aggregate,
+            "start": str(start_date.date()), "end": str(end_date.date()),
+            "max_gap": max_gap, "allow_gaps": allow_gaps,
+            "reservoir_lag_days": reservoir_lag_days,
+            "filter": getattr(filter_fn, "__name__", None) if filter_fn else None,
+            "psr": getattr(filter_fn, "psr_codes", None),
+        }
+        cache_path = (_column_cache_path(cache_dir, area.code, label, cache_key)
+                      if cache_dir and not refresh_columns else None)
+
+        cached = _load_cached_column(cache_path) if cache_path else None
+        if cached is not None:
+            cached_series, cached_label = cached
+            if not quiet:
+                print(f"  [{key}] reusing cached column: {cached_label}")
+            columns[cached_label] = cached_series
+            continue
+
+        frame_for_column = source(key)
         if filter_fn is not None:
             frame_for_column = filter_fn(frame_for_column)
         series = to_series(frame_for_column, aggregate=aggregate)
@@ -267,10 +365,26 @@ def build(zone, start, end, cache_dir=DEFAULT_CACHE, token=None, max_gap=3,
                 f"The platform returned no data for {label} in zone {area.code}. "
                 f"Check that this zone publishes that data item for the requested range."
             )
-        columns[label] = to_local_hourly_grid(
-            series, area.tz, start_date, end_date, max_gap=max_gap,
-            allow_gaps=allow_gaps,
-        )
+
+        if key == "reservoir":
+            # Weekly stock: hold each level until the next publication, and only
+            # after the week it describes has ended.
+            column = to_local_hourly_step(
+                series, area.tz, start_date, end_date,
+                available_after=RESERVOIR_PERIOD
+                + pd.Timedelta(days=reservoir_lag_days),
+                allow_gaps=allow_gaps,
+            )
+        else:
+            column = to_local_hourly_grid(
+                series, area.tz, start_date, end_date, max_gap=max_gap,
+                allow_gaps=allow_gaps,
+            )
+
+        labelled = _with_unit(label, units.get(key))
+        columns[labelled] = column
+        if cache_path:
+            _store_cached_column(cache_path, column, labelled)
 
     frame = pd.DataFrame(columns)
     # Naive local market time, not UTC -- see hourly.py. Named explicitly so the
@@ -299,6 +413,19 @@ def main(argv=None):
                         help="Exogenous layout: 'load-windsolar' (2 columns, default) "
                              "or 'load-wind-solar' (3 columns, renewables split by "
                              "production type)")
+    parser.add_argument("--include-reservoir", action="store_true",
+                        help="Append Water Reservoirs and Hydro Storage Plants "
+                             "[16.1.D] as a further exogenous column. Published "
+                             "weekly, so it is held constant between publications "
+                             "rather than interpolated.")
+    parser.add_argument("--reservoir-lag-days", type=int, default=0,
+                        help="Extra delay, in days, before a weekly reservoir "
+                             "value is treated as known (default 0, on top of the "
+                             "7-day period it describes). Raise it to model the "
+                             "platform's own reporting delay.")
+    parser.add_argument("--refresh-columns", action="store_true",
+                        help="Recompute every column instead of reusing cached "
+                             "ones. Raw XML is still served from cache.")
     parser.add_argument("--allow-gaps", action="store_true",
                         help="Acquisition only: write exactly what the platform "
                              "published, leaving every missing hour as NaN. "
@@ -320,6 +447,9 @@ def main(argv=None):
             max_gap=args.max_gap,
             exog=args.exog,
             allow_gaps=args.allow_gaps,
+            include_reservoir=args.include_reservoir,
+            reservoir_lag_days=args.reservoir_lag_days,
+            refresh_columns=args.refresh_columns,
             quiet=args.quiet,
         )
     except (KeyError, ValueError, GridError, TransparencyError) as exc:
