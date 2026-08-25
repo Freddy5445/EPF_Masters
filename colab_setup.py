@@ -28,14 +28,35 @@ def in_colab():
     return "google.colab" in sys.modules or os.path.isdir("/content")
 
 
-def _run(args, label):
+def _run(args, label, required=True):
     print(f"-- {label}")
     result = subprocess.run(args, capture_output=True, text=True)
     if result.returncode != 0:
+        if not required:
+            return result
         print(result.stdout[-2000:])
         print(result.stderr[-2000:], file=sys.stderr)
         raise RuntimeError(f"{label} failed (exit {result.returncode})")
     return result
+
+
+def ensure_epftoolbox():
+    """Make ``import epftoolbox`` work, without installing it.
+
+    The vendored tree does not need to be on the path as an installed package:
+    every module in lear_dk1/ and dnn_dk1/ inserts ``<root>/epftoolbox`` into
+    sys.path before importing from it, which is why the test suite runs with no
+    epftoolbox installed at all. Doing the same here means a fresh notebook cell
+    can ``import epftoolbox`` directly too.
+
+    Returns the file the import resolved to, so the caller can show which copy is
+    in use -- the vendored source, not the older PyPI release.
+    """
+    root = os.path.join(THIS_DIR, "epftoolbox")
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import epftoolbox
+    return epftoolbox.__file__
 
 
 def install(quiet=True):
@@ -43,9 +64,26 @@ def install(quiet=True):
     pip = [sys.executable, "-m", "pip", "install"] + (["-q"] if quiet else [])
     _run(pip + ["-r", os.path.join(THIS_DIR, "requirements-colab.txt")],
          "dependencies")
-    # epftoolbox comes from the local tree, not PyPI: the PyPI release is older
-    # than the vendored source and the models differ.
-    _run(pip + ["--no-deps", os.path.join(THIS_DIR, "epftoolbox")], "epftoolbox")
+
+    # epftoolbox comes from the local tree, never PyPI: the published release is
+    # older than the vendored source and the models differ.
+    #
+    # --ignore-requires-python is not optional. setup.py declares
+    # python_requires='>=3.9, <=3.13', and under PEP 440 "<=3.13" excludes every
+    # 3.13 patch release after 3.13.0 -- so on Colab's 3.13.15 pip refuses with
+    #
+    #   ERROR: Package 'epftoolbox' requires a different Python:
+    #          3.13.15 not in '<=3.13,>=3.9'
+    #
+    # The bound is a packaging mistake, not a real incompatibility, and the
+    # epftoolbox tree is not ours to edit.
+    result = _run(pip + ["--no-deps", "--ignore-requires-python",
+                         os.path.join(THIS_DIR, "epftoolbox")],
+                  "epftoolbox", required=False)
+    if result.returncode != 0:
+        # Not fatal: the install is a convenience, not a requirement.
+        print("   pip could not install it; using the source tree directly "
+              "instead, which is how the test suite runs anyway.")
 
 
 def describe_compute():
@@ -102,6 +140,8 @@ def bootstrap(mount=True, quiet=True):
 
     if THIS_DIR not in sys.path:
         sys.path.insert(0, THIS_DIR)
+
+    print(f"-- epftoolbox: {ensure_epftoolbox()}")
 
     if mount:
         try:
