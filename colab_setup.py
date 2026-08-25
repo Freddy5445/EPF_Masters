@@ -126,6 +126,8 @@ def mount_drive(path="/content/drive"):
     if not in_colab():
         print("Not on Colab; skipping Drive mount.")
         return None
+    if os.path.ismount(path):
+        return path
     from google.colab import drive
     drive.mount(path)
     return path

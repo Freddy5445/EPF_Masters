@@ -197,7 +197,12 @@ def assert_epftoolbox_grid(frame, allow_nan=False):
         raise GridError(f"Index has {len(dupes)} duplicate timestamps, first {dupes[0]}")
 
     deltas = index.to_series().diff().dropna().unique()
-    if len(deltas) and set(deltas) != {pd.Timedelta(hours=1).to_timedelta64()}:
+    # Compared via pd.TimedeltaIndex, not a raw numpy set: numpy timedelta64
+    # equality/hashing is unit-sensitive, so a set comparison against a fixed
+    # np.timedelta64(hours=1) can spuriously fail when `index` carries a
+    # different (but numerically equal) resolution -- e.g. the microsecond
+    # timestamps a parquet-backed panel produces on some pandas builds.
+    if len(deltas) and not (pd.TimedeltaIndex(deltas) == pd.Timedelta(hours=1)).all():
         raise GridError(f"Index is not strictly hourly (found steps {list(deltas)})")
 
     if len(index) % 24:

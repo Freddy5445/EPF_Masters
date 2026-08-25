@@ -139,6 +139,25 @@ class TestInvariant(unittest.TestCase):
         with self.assertRaises(GridError):
             assert_epftoolbox_grid(frame)
 
+    def test_non_nanosecond_index_passes(self):
+        """A microsecond-resolution index -- what a parquet-backed panel
+
+        produces on some pandas builds -- must not spuriously fail the hourly
+        step check just because its numpy dtype differs from the nanosecond
+        default used to build the comparison value.
+        """
+        frame = self._frame(24)
+        frame.index = frame.index.as_unit("us")
+        assert_epftoolbox_grid(frame)
+
+    def test_irregular_step_raises_regardless_of_resolution(self):
+        index = pd.date_range("2016-01-01", periods=24, freq="h").as_unit("us")
+        frame = pd.DataFrame(
+            {"Price": range(23)}, index=index.delete(5), dtype="float64"
+        )
+        with self.assertRaises(GridError):
+            assert_epftoolbox_grid(frame)
+
 
 if __name__ == "__main__":
     unittest.main()
