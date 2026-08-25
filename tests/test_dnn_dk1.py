@@ -19,6 +19,7 @@ import pandas as pd  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dnn_dk1 import hyperopt as dnn_hyperopt  # noqa: E402
 from dnn_dk1.forecaster import DNN, MIN_NEURONS, hyperparameter_path  # noqa: E402
 from dnn_dk1.hyperopt import build_space  # noqa: E402
 from dnn_dk1.model import BATCH_SIZE, GRADIENT_CLIP, MAX_EPOCHS, DNNModel  # noqa: E402
@@ -288,6 +289,50 @@ class TestHyperparameterFile(unittest.TestCase):
     def test_no_source_of_hyperparameters_is_rejected(self):
         with self.assertRaises(ValueError):
             DNN()
+
+
+class TestOptimizeImputation(unittest.TestCase):
+    """The hyperopt search must not train on NaN.
+
+    ``optimize()`` used to hand ``_objective`` a dfTrain/dfTest read straight
+    off disk, gaps and all -- unlike the backtest path, which imputes. A real
+    dataset's missing hours then propagated NaN into every trial's loss, and
+    hyperopt's own ``best_trial`` had nothing to pick from
+    (``hyperopt.exceptions.AllTrialsFailed``, with every trial's own status
+    showing ``ok`` and a ``nan`` loss -- it trained "successfully" on NaN).
+    """
+
+    def test_gaps_are_imputed_before_the_objective_sees_them(self):
+        index = pd.date_range("2023-01-01", periods=96, freq="h")
+        price = np.arange(96, dtype="float64")
+        exog = np.arange(96, dtype="float64") + 100
+        exog[50] = np.nan  # one-hour gap, comfortably within max_ffill's reach
+
+        dfTrain = pd.DataFrame({"Price": price[:72], "Exogenous 1": exog[:72]},
+                               index=index[:72])
+        dfTest = pd.DataFrame({"Price": price[72:], "Exogenous 1": exog[72:]},
+                              index=index[72:])
+        self.assertTrue(dfTrain.isna().any().any(), "test setup must start with a gap")
+
+        captured = {}
+
+        def fake_fmin(objective, **kwargs):
+            captured["dfTrain"] = objective.keywords["dfTrain"]
+            captured["dfTest"] = objective.keywords["dfTest"]
+
+        with mock.patch("epftoolbox.data.read_data",
+                        return_value=(dfTrain, dfTest)), \
+             mock.patch("dnn_dk1.hyperopt.fmin", side_effect=fake_fmin), \
+             tempfile.TemporaryDirectory() as tmp:
+            dnn_hyperopt.optimize(
+                path_datasets_folder=tmp, path_hyperparameters_folder=tmp,
+                dataset="TEST", begin_test_date=index[72], end_test_date=index[-1],
+                max_evals=1, quiet=True)
+
+        self.assertIn("dfTrain", captured, "fmin was never called")
+        seen = pd.concat([captured["dfTrain"], captured["dfTest"]])
+        self.assertFalse(seen.isna().any().any(),
+                         "optimize() must impute gaps before the search sees them")
 
 
 class TestSearchSpace(unittest.TestCase):

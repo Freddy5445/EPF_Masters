@@ -150,6 +150,7 @@ def main(argv=None):
             end_test_date=hyperopt_end,
             max_evals=max_evals, nlayers=args.nlayers,
             calibration_window=args.calibration_years,
+            max_linear=args.max_linear,
             quiet=True)
         print(f"  {time.time() - started:.0f}s -> {path}\n")
 

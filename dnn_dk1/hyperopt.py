@@ -33,6 +33,7 @@ from epftoolbox.evaluation import MAE, sMAPE  # noqa: E402
 from epftoolbox.models._dnn import _build_and_split_XYs  # noqa: E402
 
 from .forecaster import MIN_NEURONS, hyperparameter_path  # noqa: E402
+from lear_dk1.impute import first_complete_day, impute_frame  # noqa: E402
 
 # Widths searched per layer, upstream's ranges.
 NEURON_RANGES = {1: (50, 500), 2: (25, 400), 3: (25, 300), 4: (25, 200), 5: (25, 200)}
@@ -154,7 +155,8 @@ def _objective(hyperparameters, trials, trials_file_path, max_evals, nlayers,
 def optimize(path_datasets_folder, path_hyperparameters_folder, dataset,
              begin_test_date, end_test_date, max_evals=1500, nlayers=2,
              years_test=2, calibration_window=4, shuffle_train=1,
-             data_augmentation=0, experiment_id=1, new_hyperopt=1, quiet=False):
+             data_augmentation=0, experiment_id=1, new_hyperopt=1, quiet=False,
+             max_linear=3):
     """Run the search and write the trials file. Returns its path.
 
     ``max_evals`` is 1500 in the paper. A smoke run uses a handful -- enough to
@@ -176,6 +178,20 @@ def optimize(path_datasets_folder, path_hyperparameters_folder, dataset,
     dfTrain, dfTest = read_data(
         dataset=dataset, years_test=years_test, path=path_datasets_folder,
         begin_test_date=begin_test_date, end_test_date=end_test_date)
+
+    # A raw dataset carries real gaps (ENTSO-E does not publish everything), and
+    # unlike the backtest path this search never went through lear_dk1.impute --
+    # it fit straight on NaN, which Keras propagates into every loss, so *every*
+    # trial scored `nan` regardless of hyperparameters. Impute train+test as one
+    # frame, exactly as the backtest does, so the boundary is filled consistently.
+    test_start = dfTest.index[0]
+    combined = pd.concat([dfTrain, dfTest], axis=0)
+    if combined.isna().any().any():
+        combined, _ = impute_frame(combined, max_ffill=max_linear)
+        if combined.isna().any().any():
+            combined = combined.loc[first_complete_day(combined):]
+    dfTrain = combined.loc[:test_start - pd.Timedelta(hours=1)]
+    dfTest = combined.loc[test_start:]
 
     n_exogenous_inputs = len(dfTrain.columns) - 1
     space = build_space(nlayers, data_augmentation, n_exogenous_inputs)
