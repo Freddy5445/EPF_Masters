@@ -1,0 +1,487 @@
+[
+  {
+    "zone": "DK1",
+    "hours": 85440,
+    "timezone": "Europe/Copenhagen",
+    "dst_hours_interpolated": 50,
+    "imputation": {
+      "generation_forecast|solar": {
+        "missing": 385,
+        "share": 0.004505,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 384,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "generation_forecast|wind_offshore": {
+        "missing": 241,
+        "share": 0.00282,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 240,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "generation_forecast|wind_onshore": {
+        "missing": 355,
+        "share": 0.004154,
+        "forward_fill": 5,
+        "same_hour_earlier_week": 349,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "load_forecast": {
+        "missing": 1,
+        "share": 1.2e-05,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      }
+    },
+    "trimmed_leading_hours_no_history": 24,
+    "complete": true
+  },
+  {
+    "zone": "DK2",
+    "hours": 85440,
+    "timezone": "Europe/Copenhagen",
+    "dst_hours_interpolated": 50,
+    "imputation": {
+      "generation_forecast|solar": {
+        "missing": 339,
+        "share": 0.003967,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 338,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "generation_forecast|wind_offshore": {
+        "missing": 217,
+        "share": 0.002539,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 216,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "generation_forecast|wind_onshore": {
+        "missing": 337,
+        "share": 0.003943,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 336,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "load_forecast": {
+        "missing": 1,
+        "share": 1.2e-05,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      }
+    },
+    "trimmed_leading_hours_no_history": 24,
+    "complete": true
+  },
+  {
+    "zone": "NO1",
+    "hours": 85392,
+    "timezone": "Europe/Oslo",
+    "dst_hours_interpolated": 40,
+    "imputation": {
+      "generation_forecast|wind_onshore": {
+        "missing": 49,
+        "share": 0.000573,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 48,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "load_forecast": {
+        "missing": 1,
+        "share": 1.2e-05,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      },
+      "reservoir": {
+        "missing": 72,
+        "share": 0.000842,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 72
+      }
+    },
+    "trimmed_leading_hours_no_history": 72,
+    "complete": true
+  },
+  {
+    "zone": "NO2",
+    "hours": 85392,
+    "timezone": "Europe/Oslo",
+    "dst_hours_interpolated": 40,
+    "imputation": {
+      "generation_forecast|wind_onshore": {
+        "missing": 49,
+        "share": 0.000573,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 48,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "load_forecast": {
+        "missing": 1,
+        "share": 1.2e-05,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      },
+      "reservoir": {
+        "missing": 72,
+        "share": 0.000842,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 72
+      }
+    },
+    "trimmed_leading_hours_no_history": 72,
+    "complete": true
+  },
+  {
+    "zone": "NO3",
+    "hours": 85392,
+    "timezone": "Europe/Oslo",
+    "dst_hours_interpolated": 40,
+    "imputation": {
+      "generation_forecast|wind_onshore": {
+        "missing": 49,
+        "share": 0.000573,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 48,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "load_forecast": {
+        "missing": 1,
+        "share": 1.2e-05,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      },
+      "reservoir": {
+        "missing": 72,
+        "share": 0.000842,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 72
+      }
+    },
+    "trimmed_leading_hours_no_history": 72,
+    "complete": true
+  },
+  {
+    "zone": "NO4",
+    "hours": 85392,
+    "timezone": "Europe/Oslo",
+    "dst_hours_interpolated": 40,
+    "imputation": {
+      "generation_forecast|wind_onshore": {
+        "missing": 49,
+        "share": 0.000573,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 48,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "load_forecast": {
+        "missing": 1,
+        "share": 1.2e-05,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      },
+      "reservoir": {
+        "missing": 72,
+        "share": 0.000842,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 72
+      }
+    },
+    "trimmed_leading_hours_no_history": 72,
+    "complete": true
+  },
+  {
+    "zone": "NO5",
+    "hours": 85392,
+    "timezone": "Europe/Oslo",
+    "dst_hours_interpolated": 30,
+    "imputation": {
+      "load_forecast": {
+        "missing": 1,
+        "share": 1.2e-05,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      },
+      "reservoir": {
+        "missing": 72,
+        "share": 0.000842,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 72
+      }
+    },
+    "trimmed_leading_hours_no_history": 72,
+    "complete": true
+  },
+  {
+    "zone": "SE1",
+    "hours": 33576,
+    "timezone": "Europe/Stockholm",
+    "dst_hours_interpolated": 44,
+    "imputation": {
+      "generation_forecast|solar": {
+        "missing": 51960,
+        "share": 0.607975,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 72,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 51888
+      },
+      "generation_forecast|wind_onshore": {
+        "missing": 193,
+        "share": 0.002258,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 192,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "load_forecast": {
+        "missing": 25,
+        "share": 0.000293,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 24,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      },
+      "reservoir": {
+        "missing": 72,
+        "share": 0.000842,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 72
+      }
+    },
+    "trimmed_leading_hours_no_history": 51888,
+    "complete": true
+  },
+  {
+    "zone": "SE2",
+    "hours": 33576,
+    "timezone": "Europe/Stockholm",
+    "dst_hours_interpolated": 44,
+    "imputation": {
+      "generation_forecast|solar": {
+        "missing": 51960,
+        "share": 0.607975,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 72,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 51888
+      },
+      "generation_forecast|wind_onshore": {
+        "missing": 193,
+        "share": 0.002258,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 192,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "load_forecast": {
+        "missing": 25,
+        "share": 0.000293,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 24,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      },
+      "reservoir": {
+        "missing": 72,
+        "share": 0.000842,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 72
+      }
+    },
+    "trimmed_leading_hours_no_history": 51888,
+    "complete": true
+  },
+  {
+    "zone": "SE3",
+    "hours": 33576,
+    "timezone": "Europe/Stockholm",
+    "dst_hours_interpolated": 44,
+    "imputation": {
+      "generation_forecast|solar": {
+        "missing": 51960,
+        "share": 0.607975,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 72,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 51888
+      },
+      "generation_forecast|wind_onshore": {
+        "missing": 193,
+        "share": 0.002258,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 192,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "load_forecast": {
+        "missing": 25,
+        "share": 0.000293,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 24,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      },
+      "reservoir": {
+        "missing": 72,
+        "share": 0.000842,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 72
+      }
+    },
+    "trimmed_leading_hours_no_history": 51888,
+    "complete": true
+  },
+  {
+    "zone": "SE4",
+    "hours": 33576,
+    "timezone": "Europe/Stockholm",
+    "dst_hours_interpolated": 44,
+    "imputation": {
+      "generation_forecast|solar": {
+        "missing": 51960,
+        "share": 0.607975,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 72,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 51888
+      },
+      "generation_forecast|wind_onshore": {
+        "missing": 193,
+        "share": 0.002258,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 192,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "load_forecast": {
+        "missing": 25,
+        "share": 0.000293,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 24,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 1
+      },
+      "price": {
+        "missing": 0
+      },
+      "reservoir": {
+        "missing": 72,
+        "share": 0.000842,
+        "forward_fill": 0,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 72
+      }
+    },
+    "trimmed_leading_hours_no_history": 51888,
+    "complete": true
+  }
+]
