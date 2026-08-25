@@ -96,8 +96,9 @@ class TestEnsemble(unittest.TestCase):
                                  columns=HOURS)
             frame.iloc[-1, 5:] = np.nan
             frame.to_csv(os.path.join(tmp, "forecasts_cw0056.csv"))
-            loaded = load_forecasts(tmp)
+            loaded, label = load_forecasts(tmp)
             self.assertEqual(sorted(loaded), [56])
+            self.assertEqual(label, "cw")
             self.assertEqual(len(loaded[56]), 2)
 
 
@@ -208,7 +209,7 @@ class TestEvaluateRun(unittest.TestCase):
 
             results = evaluate_run(run_dir, dataset="ZZ1", datasets_dir=datasets,
                                    quiet=True)
-            self.assertEqual(results["windows"], [56, 84])
+            self.assertEqual(results["members"], ["cw56", "cw84"])
 
             with open(os.path.join(run_dir, "evaluation.json"), encoding="utf-8") as f:
                 text = f.read()
@@ -248,7 +249,7 @@ class TestEvaluateRun(unittest.TestCase):
             evaluate_run(run_dir, dataset="NO1_clean_load-windsolar",
                          datasets_dir=datasets, quiet=True)
 
-            windows = load_forecasts(run_dir)
+            windows, _ = load_forecasts(run_dir)
             expected = np.mean([windows[w].to_numpy(float) for w in sorted(windows)],
                                axis=0).reshape(-1)
             frame = pd.read_csv(os.path.join(run_dir, PREDICTIONS_FILE))
@@ -317,6 +318,74 @@ class TestHourlyPredictions(unittest.TestCase):
     def test_zone_is_derived_from_the_dataset_name(self):
         self.assertEqual(zone_from_dataset("NO1_clean_load-windsolar"), "NO1")
         self.assertEqual(zone_from_dataset("DK1_clean_load-windsolar-hydro"), "DK1")
+
+
+class TestMemberKinds(unittest.TestCase):
+    """LEAR ensembles over calibration windows, the DNN over random seeds.
+
+    Both are scored by this module, so a run of either must be recognised and
+    labelled correctly -- otherwise the DNN's numbers would not be comparable
+    with LEAR's, which is the whole reason they share a scorer.
+    """
+
+    def _write(self, run_dir, prefix, numbers, days=30):
+        os.makedirs(run_dir, exist_ok=True)
+        real = prices(days=days, seed=5)
+        rng = np.random.default_rng(3)
+        for n in numbers:
+            (real + rng.normal(0, 3, real.shape)).to_csv(
+                os.path.join(run_dir, f"{prefix}{n}.csv"))
+        return real
+
+    def test_seed_runs_are_detected_and_labelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, "forecasts_seed", [1, 2, 3, 4])
+            forecasts, label = load_forecasts(tmp)
+            self.assertEqual(label, "seed")
+            self.assertEqual(sorted(forecasts), [1, 2, 3, 4])
+
+    def test_window_runs_are_detected_and_labelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, "forecasts_cw", ["0056", "0084"])
+            forecasts, label = load_forecasts(tmp)
+            self.assertEqual(label, "cw")
+            # Zero padding must not survive into the score names.
+            self.assertEqual(sorted(forecasts), [56, 84])
+
+    def test_a_directory_holding_both_kinds_is_refused(self):
+        """One run is one model; silently scoring half of it would be worse."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, "forecasts_cw", ["0056"])
+            self._write(tmp, "forecasts_seed", [1])
+            with self.assertRaises(ValueError) as caught:
+                load_forecasts(tmp)
+            self.assertIn("both", str(caught.exception))
+
+    def test_seed_scores_and_tests_are_named_by_seed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = os.path.join(tmp, "run")
+            datasets = os.path.join(tmp, "datasets")
+            real = self._write(run_dir, "forecasts_seed", [1, 2], days=40)
+
+            os.makedirs(datasets, exist_ok=True)
+            index = pd.date_range(real.index[0], periods=len(real) * 24, freq="h")
+            pd.DataFrame({"Price": real.to_numpy(float).reshape(-1),
+                          "Exogenous 1": np.arange(len(index), dtype=float),
+                          "Exogenous 2": np.arange(len(index), dtype=float)},
+                         index=index).rename_axis("Date").to_csv(
+                os.path.join(datasets, "DK1.csv"), date_format="%Y-%m-%dT%H:%M:%S")
+
+            results = evaluate_run(run_dir, dataset="DK1", datasets_dir=datasets,
+                                   quiet=True)
+            self.assertEqual(results["member_kind"], "seed")
+            self.assertIn("seed1", results["scores"])
+            self.assertIn("ensemble", results["scores"])
+            self.assertIn("ensemble_vs_seed1", results["tests"])
+            # The deliverable is written for a DNN run exactly as for a LEAR one.
+            frame = pd.read_csv(os.path.join(run_dir, PREDICTIONS_FILE))
+            self.assertEqual(list(frame.columns),
+                             ["timestamp_local", "zone", "forecast", "observed"])
+            self.assertEqual(len(frame), 40 * 24)
 
 
 class TestRunDirSelection(unittest.TestCase):

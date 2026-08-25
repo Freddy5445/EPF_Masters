@@ -20,6 +20,7 @@ a trailing ``\`` is not a line continuation and truncates the command.
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -31,6 +32,10 @@ os.environ.setdefault("KERAS_BACKEND", "tensorflow")
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+
+from lear_dk1.impute import (  # noqa: E402
+    first_complete_day, format_report, impute_frame,
+)
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATASETS = os.path.join(THIS_DIR, "datasets")
@@ -69,6 +74,15 @@ def main(argv=None):
                         help="Comma-separated seeds; the ensemble averages them")
     parser.add_argument("--skip-hyperopt", action="store_true",
                         help="Reuse an existing trials file instead of searching")
+    parser.add_argument("--no-impute", action="store_true",
+                        help="Fail instead of filling missing values. The DNN "
+                             "cannot be fitted on NaN, so this only reports them.")
+    parser.add_argument("--max-linear", type=int, default=3,
+                        help="Longest gap to forward-fill, in hours (default 3). "
+                             "Matches run_lear_dk1.py, so both models see the "
+                             "same inputs.")
+    parser.add_argument("--no-evaluate", action="store_true",
+                        help="Skip scoring; write the forecasts only")
     parser.add_argument("--smoke", action="store_true",
                         help="5 hyperopt evaluations, 3 forecast days, 1 seed. "
                              "Proves the pipeline runs; proves nothing about accuracy.")
@@ -137,20 +151,49 @@ def main(argv=None):
     if args.data_start:
         data = data.loc[pd.Timestamp(args.data_start):]
 
+    # Impute exactly as the LEAR path does, with the same module and the same
+    # default. Both models must see identically prepared inputs, or a difference
+    # in their scores could be a difference in data handling rather than in the
+    # models. Every filled value comes from earlier observations only.
+    imputation, trimmed_no_history = None, 0
     if data.isna().any().any():
-        counts = data.isna().sum()
-        print(f"error: the dataset has missing values "
-              f"{counts[counts > 0].to_dict()}. The DNN cannot be fitted on NaN.",
-              file=sys.stderr)
-        print("run_lear_dk1.py imputes causally before fitting; the DNN path does "
-              "not do that yet.", file=sys.stderr)
-        return 1
+        if args.no_impute:
+            counts = data.isna().sum()
+            print(f"error: the dataset has missing values "
+                  f"{counts[counts > 0].to_dict()} and --no-impute was given. "
+                  f"The DNN cannot be fitted on NaN.", file=sys.stderr)
+            return 1
+
+        data, imputation = impute_frame(data, max_ffill=args.max_linear)
+        print("Imputed missing values (past observations only):")
+        print(format_report(imputation, len(data)))
+
+        # Causal imputation cannot fill hours with no history behind them, so
+        # those are dropped rather than invented.
+        if data.isna().any().any():
+            usable_from = first_complete_day(data)
+            trimmed_no_history = int((data.index < usable_from).sum())
+            data = data.loc[usable_from:]
+            print(f"  Trimmed {trimmed_no_history:,} leading hour(s) with no "
+                  f"history to impute from; data now starts {usable_from}")
+            if data.empty or usable_from >= begin_test:
+                print(f"error: after dropping unfillable leading hours the data "
+                      f"starts at {usable_from}, at or after the test start "
+                      f"{begin_test}. Raise --data-start.", file=sys.stderr)
+                return 1
+        print()
 
     days = pd.date_range(begin_test, end_test, freq="D")
     print(f"Forecasting {len(days)} day(s), {len(seeds)} seed(s), "
           f"{args.calibration_years}-year window, recalibrating daily")
 
-    forecasts = {}
+    os.makedirs(args.out_dir, exist_ok=True)
+    run_dir = os.path.join(
+        args.out_dir, f"{args.dataset}_dnn_{begin_test.date()}_{end_test.date()}"
+        + ("_smoke" if args.smoke else ""))
+    os.makedirs(run_dir, exist_ok=True)
+
+    forecasts, timings = {}, []
     for seed in seeds:
         model = DNN(path_hyperparameter_folder=hyper_dir, experiment_id=1,
                     nlayers=args.nlayers, dataset=args.dataset,
@@ -159,6 +202,7 @@ def main(argv=None):
         for n, day in enumerate(days, 1):
             started = time.time()
             prediction = model.recalibrate_and_forecast_next_day(data, day)
+            timings.append(time.time() - started)
             # The forecast comes back as (1, 24) when scaleY is set (the scaler's
             # inverse_transform reshapes) and (24,) when it is not, so flatten
             # rather than assume either.
@@ -168,19 +212,59 @@ def main(argv=None):
                   f"{time.time() - started:6.1f}s")
         forecasts[seed] = pd.DataFrame(rows)
         forecasts[seed].columns = [f"h{h}" for h in range(24)]
+        # Written per seed as it finishes, so an interrupted run keeps the seeds
+        # it completed instead of losing all of them.
+        forecasts[seed].to_csv(os.path.join(run_dir, f"forecasts_seed{seed}.csv"))
 
-    ensemble = sum(forecasts.values()) / len(forecasts)
-
-    os.makedirs(args.out_dir, exist_ok=True)
-    run_dir = os.path.join(
-        args.out_dir, f"{args.dataset}_dnn_{begin_test.date()}_{end_test.date()}"
-        + ("_smoke" if args.smoke else ""))
     os.makedirs(run_dir, exist_ok=True)
     for seed, frame in forecasts.items():
         frame.to_csv(os.path.join(run_dir, f"forecasts_seed{seed}.csv"))
-    ensemble.to_csv(os.path.join(run_dir, "forecasts_ensemble.csv"))
+
+    # The same manifest the LEAR runs write, so both models' runs describe
+    # themselves the same way.
+    manifest = {
+        "model": "DNN",
+        "dataset": args.dataset,
+        "n_exogenous": len(data.columns) - 1,
+        "test_start": str(begin_test), "test_end": str(end_test),
+        "test_days": len(days),
+        "seeds": seeds,
+        "calibration_window_years": args.calibration_years,
+        "nlayers": args.nlayers,
+        "hyperopt_evals": max_evals,
+        "hyperopt_range": [str(hyperopt_begin.date()), str(hyperopt_end.date())],
+        "data_start": str(data.index.min()),
+        "imputation": {
+            "applied": imputation is not None,
+            "causal": True,
+            "max_forward_fill_hours": args.max_linear,
+            "trimmed_leading_hours_no_history": trimmed_no_history,
+            "columns": imputation or {},
+        },
+        "seconds_per_recalibration": round(
+            sum(timings) / max(len(timings), 1), 1),
+    }
+    with open(os.path.join(run_dir, "run_metadata.json"), "w", encoding="utf-8") as h:
+        json.dump(manifest, h, indent=2, default=str)
 
     print(f"\nwritten: {run_dir}")
+
+    if not args.no_evaluate:
+        # Scored by the LEAR evaluator, not a parallel copy of it. The ensemble
+        # mean, MAE, rMAE against a weekly naive, the DM/GW tests and
+        # predictions.csv are all produced by the same code that scores LEAR, so
+        # the two models' figures mean the same thing and can be compared
+        # directly.
+        from lear_dk1.evaluate import evaluate_run
+        try:
+            results = evaluate_run(run_dir, dataset=args.dataset,
+                                   datasets_dir=args.datasets_dir,
+                                   zone=args.dataset.split("_")[0], kind="seed")
+            print(f"\npredictions: {results['predictions']}")
+        except ValueError as exc:
+            print(f"\nnot scored: {exc}", file=sys.stderr)
+            return 1
+
     return 0
 
 
