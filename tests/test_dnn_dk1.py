@@ -15,6 +15,7 @@ from unittest import mock
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -203,6 +204,62 @@ class TestSeeding(unittest.TestCase):
             all(np.allclose(wa, wb) for wa, wb in zip(a, b)),
             "different seeds produced identical weights -- the ensemble would be "
             "four copies of one model")
+
+
+class TestDrawSeed(unittest.TestCase):
+    """The per-(seed, day) RNG seed that makes a run reproducible.
+
+    epftoolbox draws the train/validation split with
+
+        if hyperoptimization:
+            np.random.seed(7)
+        np.random.shuffle(index_week)
+
+    so in a backtest -- hyperoptimization False -- the split comes from the
+    unseeded global RNG, before recalibrate() seeds anything. Which validation
+    days a model sees would then depend on how many draws happened earlier in
+    the process: the same day would forecast differently depending on what ran
+    before it, no run could be reproduced, and a resumed run would not match the
+    uninterrupted one it continued.
+    """
+
+    def _forecaster(self, seed):
+        obj = DNN.__new__(DNN)
+        obj.seed = seed
+        obj.best_hyperparameters = {"seed": 999}
+        return obj
+
+    def test_same_seed_and_day_gives_the_same_draw(self):
+        day = pd.Timestamp("2023-12-01")
+        self.assertEqual(self._forecaster(1)._draw_seed(day),
+                         self._forecaster(1)._draw_seed(day))
+
+    def test_different_days_draw_differently(self):
+        """Otherwise every day would get the identical weekly permutation."""
+        f = self._forecaster(1)
+        seeds = {f._draw_seed(d) for d in pd.date_range("2023-12-01", periods=50)}
+        self.assertEqual(len(seeds), 50)
+
+    def test_different_seeds_draw_differently(self):
+        day = pd.Timestamp("2023-12-01")
+        values = {self._forecaster(s)._draw_seed(day) for s in (1, 2, 3, 4)}
+        self.assertEqual(len(values), 4)
+
+    def test_falls_back_to_the_hyperparameter_seed(self):
+        obj = DNN.__new__(DNN)
+        obj.seed = None
+        obj.best_hyperparameters = {"seed": 7}
+        explicit = self._forecaster(7)
+        day = pd.Timestamp("2023-12-01")
+        self.assertEqual(obj._draw_seed(day), explicit._draw_seed(day))
+
+    def test_stays_within_numpys_accepted_range(self):
+        """numpy's legacy seeding rejects anything outside 32 bits."""
+        f = self._forecaster(1000)
+        for day in pd.date_range("2015-01-01", periods=200, freq="17D"):
+            value = f._draw_seed(day)
+            self.assertGreaterEqual(value, 0)
+            self.assertLess(value, 2 ** 31 - 1)
 
 
 class TestHyperparameterFile(unittest.TestCase):

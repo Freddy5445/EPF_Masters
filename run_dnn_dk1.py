@@ -36,6 +36,18 @@ import pandas as pd  # noqa: E402
 from lear_dk1.impute import (  # noqa: E402
     first_complete_day, format_report, impute_frame,
 )
+# Private, but shared on purpose: the resume semantics -- in particular that an
+# incomplete final row is discarded rather than trusted -- must match the LEAR
+# backtest's, or the two models would recover differently from an interruption.
+from lear_dk1.backtest import _load_checkpoint  # noqa: E402
+
+HOURS = [f"h{h}" for h in range(24)]
+
+
+def _append_timing(path, row):
+    """Append one row to a per-seed timing file, writing the header once."""
+    header = not os.path.exists(path)
+    pd.DataFrame([row]).to_csv(path, mode="a", header=header, index=False)
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATASETS = os.path.join(THIS_DIR, "datasets")
@@ -193,32 +205,87 @@ def main(argv=None):
         + ("_smoke" if args.smoke else ""))
     os.makedirs(run_dir, exist_ok=True)
 
-    forecasts, timings = {}, []
+    forecast_paths = {s: os.path.join(run_dir, f"forecasts_seed{s}.csv") for s in seeds}
+    timing_paths = {s: os.path.join(run_dir, f"timings_seed{s}.csv") for s in seeds}
+
+    # Resume whatever a previous run of the same command finished. _load_checkpoint
+    # is shared with the LEAR backtest rather than reimplemented, so both models
+    # treat a half-written final row identically: it is dropped and recomputed.
+    forecasts = {}
     for seed in seeds:
-        model = DNN(path_hyperparameter_folder=hyper_dir, experiment_id=1,
-                    nlayers=args.nlayers, dataset=args.dataset,
-                    calibration_window=args.calibration_years, seed=seed)
-        rows = []
-        for n, day in enumerate(days, 1):
+        frame = pd.DataFrame(index=days, columns=HOURS, dtype="float64")
+        done = _load_checkpoint(forecast_paths[seed])
+        if done is not None and len(done):
+            common = frame.index.intersection(done.index)
+            frame.loc[common, :] = done.loc[common, :]
+        forecasts[seed] = frame
+
+    already = sum(1 for d in days
+                  if all(forecasts[s].loc[d].notna().all() for s in seeds))
+    if already:
+        print(f"Resuming: {already} of {len(days)} day(s) already done for every seed")
+
+    models = {seed: DNN(path_hyperparameter_folder=hyper_dir, experiment_id=1,
+                        nlayers=args.nlayers, dataset=args.dataset,
+                        calibration_window=args.calibration_years, seed=seed)
+              for seed in seeds}
+
+    # Day outer, seed inner. Every seed advances together, so an interruption
+    # always leaves a *balanced* ensemble: all members cover exactly the same days
+    # and what has been computed can be scored straight away. Running the seeds
+    # one after another instead leaves a ragged set, and build_ensemble intersects
+    # the members' indices -- so a single lagging seed would drag the whole
+    # ensemble back to its own last finished day.
+    #
+    # This costs nothing. recalibrate() builds a fresh network for every day
+    # regardless, so holding one DNN per seed adds only their hyperparameter
+    # dicts. Nor does it change the numbers -- but only because
+    # recalibrate_and_forecast_next_day seeds the RNG from (seed, day) before
+    # building the features. Without that, upstream draws the train/validation
+    # split from the unseeded global RNG, and the order in which days and seeds
+    # ran would change the forecasts. See that method for the detail.
+    timings = []
+    run_started = time.time()
+    computed_days = 0
+
+    for n, day in enumerate(days, 1):
+        day_started = time.time()
+        ran = []
+        for seed in seeds:
+            if forecasts[seed].loc[day].notna().all():
+                continue
             started = time.time()
-            prediction = model.recalibrate_and_forecast_next_day(data, day)
-            timings.append(time.time() - started)
+            prediction = models[seed].recalibrate_and_forecast_next_day(data, day)
+            elapsed = time.time() - started
+
             # The forecast comes back as (1, 24) when scaleY is set (the scaler's
             # inverse_transform reshapes) and (24,) when it is not, so flatten
             # rather than assume either.
-            rows.append(pd.Series(np.asarray(prediction, dtype=float).reshape(-1),
-                                  name=day))
-            print(f"  seed {seed}  [{n}/{len(days)}] {day.date()}  "
-                  f"{time.time() - started:6.1f}s")
-        forecasts[seed] = pd.DataFrame(rows)
-        forecasts[seed].columns = [f"h{h}" for h in range(24)]
-        # Written per seed as it finishes, so an interrupted run keeps the seeds
-        # it completed instead of losing all of them.
-        forecasts[seed].to_csv(os.path.join(run_dir, f"forecasts_seed{seed}.csv"))
+            forecasts[seed].loc[day, :] = np.asarray(
+                prediction, dtype=float).reshape(-1)
+            timings.append(elapsed)
+            ran.append(seed)
 
-    os.makedirs(run_dir, exist_ok=True)
-    for seed, frame in forecasts.items():
-        frame.to_csv(os.path.join(run_dir, f"forecasts_seed{seed}.csv"))
+            # Checkpoint immediately: a 60-hour run must never lose more than one
+            # recalibration. Rows for days not yet reached are still all-NaN and
+            # are dropped on read, by _load_checkpoint and by the evaluator alike.
+            forecasts[seed].to_csv(forecast_paths[seed])
+            _append_timing(timing_paths[seed], {
+                "date": day.isoformat(), "seed": seed,
+                "seconds": round(elapsed, 3),
+                "calibration_window_years": args.calibration_years,
+                "model": "DNN",
+            })
+
+        if not ran:
+            continue
+
+        computed_days += 1
+        per_day = (time.time() - run_started) / computed_days
+        eta = (len(days) - n) * per_day
+        print(f"  [{n}/{len(days)}] {day.date()}  "
+              f"seed(s) {','.join(str(s) for s in ran)}  "
+              f"{time.time() - day_started:6.1f}s   eta {eta / 3600:5.1f}h")
 
     # The same manifest the LEAR runs write, so both models' runs describe
     # themselves the same way.

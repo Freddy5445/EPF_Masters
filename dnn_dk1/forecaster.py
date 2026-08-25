@@ -106,6 +106,16 @@ class DNN:
             trials = pc.load(handle)
         self.best_hyperparameters = format_best_trial(trials.best_trial)
 
+    def _draw_seed(self, day):
+        """A stable seed for one (seed, day) pair.
+
+        Mixed with the day so consecutive days do not all draw the identical
+        weekly permutation, and kept inside 32 bits because that is what
+        numpy's legacy seeding accepts.
+        """
+        base = int(self.best_hyperparameters['seed'] if self.seed is None else self.seed)
+        return (base * 100_003 + day.toordinal()) % (2 ** 31 - 1)
+
     def _regularize_data(self, Xtrain, Xval, Xtest, Ytrain, Yval):
         """Scale inputs and outputs by whatever hyperopt chose."""
         if self.best_hyperparameters['scaleX'] in ['Norm', 'Norm1', 'Std', 'Median', 'Invariant']:
@@ -165,7 +175,31 @@ class DNN:
         Only data strictly before the forecast day enters training, and the test
         frame reaches back two weeks solely so the lagged features of the
         forecast day can be built. Nothing after the forecast day is read.
+
+        The RNG is seeded from (seed, day) first. This matters more than it
+        looks: ``_build_and_split_XYs`` draws the train/validation split with
+
+            if hyperoptimization:
+                np.random.seed(7)
+            np.random.shuffle(index_week)
+
+        so during a backtest -- where ``hyperoptimization`` is False -- the split
+        is drawn from the *unseeded global* RNG, and it is drawn before
+        ``recalibrate`` gets to call ``set_random_seed``. Left alone, which
+        validation days a model sees would depend on how many random draws
+        happened earlier in the process, so the same day would forecast
+        differently depending on what ran before it. A run could not be
+        reproduced, and an interrupted run could not be resumed without changing
+        the forecasts it had already made.
+
+        Seeding here fixes each (day, seed) pair independently of execution
+        history. It does not change what is drawn from -- the split is still a
+        uniform random weekly permutation, as upstream intends -- only that the
+        draw is repeatable.
         """
+        import keras
+        keras.utils.set_random_seed(self._draw_seed(next_day_date))
+
         df_train = df.loc[:next_day_date - pd.Timedelta(hours=1)]
         df_train = df_train.loc[
             next_day_date - pd.Timedelta(hours=self.calibration_window * 364 * 24):]
