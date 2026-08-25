@@ -11,7 +11,7 @@
 __pycache__/
 *.py[cod]
 
-# csv files
+# csv files (datasets are not committed; see notebooks/dnn_colab.ipynb for Colab)
 *.csv
 
 # Backtest run artifacts (forecasts, timings, run manifests). These are results,

@@ -1,0 +1,19 @@
+# Minimal direct dependencies, for Google Colab.
+#
+# requirements.txt is a full transitive pin taken from the Windows Python 3.11
+# environment. Do not use it on Colab: it pins numpy, pandas and tensorflow to
+# exact versions that fight what Colab has preinstalled, and forcing them
+# through usually breaks the runtime's CUDA wiring.
+#
+# These are unpinned on purpose. Colab already ships working, GPU-wired builds
+# of numpy, pandas, scipy, scikit-learn, matplotlib and tensorflow; pip leaves
+# them alone unless a constraint says otherwise. In practice only hyperopt is
+# actually missing.
+#
+#   pip install -r requirements-colab.txt
+#   pip install ./epftoolbox
+#
+hyperopt
+pyarrow
+requests
+statsmodels
