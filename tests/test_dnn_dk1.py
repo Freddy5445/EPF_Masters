@@ -10,6 +10,7 @@ import pickle
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
@@ -118,6 +119,13 @@ class TestKeras3Fixes(unittest.TestCase):
 
 
 class TestTraining(unittest.TestCase):
+    """The training loop's mechanics.
+
+    MAX_EPOCHS is patched down to keep these quick. The real cap is upstream's
+    1000, asserted in TestKeras3Fixes; what is under test here is that the loop
+    trains, early-stops and restores weights -- none of which needs 1000 epochs,
+    and each epoch costs a fit, an evaluate and a predict.
+    """
 
     def _data(self, n=64, features=12, seed=0):
         rng = np.random.default_rng(seed)
@@ -129,17 +137,46 @@ class TestTraining(unittest.TestCase):
         X, Y = self._data()
         model = DNNModel(neurons=[16], n_features=X.shape[1], lr=0.01,
                          epochs_early_stopping=2)
-        model.fit(X, Y, X, Y)
+        with mock.patch("dnn_dk1.model.MAX_EPOCHS", 5):
+            model.fit(X, Y, X, Y)
         self.assertEqual(model.predict(X[:1]).shape, (1, 24))
 
-    def test_early_stopping_restores_weights(self):
-        """fit() must end with the kept weights installed, not the last epoch's."""
+    def test_training_changes_the_weights(self):
         X, Y = self._data()
         model = DNNModel(neurons=[16], n_features=X.shape[1], lr=0.01,
                          epochs_early_stopping=2)
-        model.fit(X, Y, X, Y)
-        before = model.predict(X[:1])
-        np.testing.assert_allclose(before, model.predict(X[:1]))
+        before = [w.copy() for w in model.model.get_weights()]
+        with mock.patch("dnn_dk1.model.MAX_EPOCHS", 5):
+            model.fit(X, Y, X, Y)
+        after = model.model.get_weights()
+        self.assertFalse(all(np.allclose(a, b) for a, b in zip(before, after)),
+                         "fit() left the weights untouched")
+
+    def test_early_stopping_installs_the_kept_weights(self):
+        """fit() must end with the kept weights, not whatever the last epoch left.
+
+        The loop tracks bestWeights and calls set_weights at the end; if that
+        final call were dropped, the model would silently keep the last epoch's
+        weights instead of the ones early stopping selected.
+        """
+        X, Y = self._data()
+        model = DNNModel(neurons=[16], n_features=X.shape[1], lr=0.01,
+                         epochs_early_stopping=2)
+
+        captured = {}
+        real_set = model.model.set_weights
+
+        def spy(weights):
+            captured["weights"] = [w.copy() for w in weights]
+            return real_set(weights)
+
+        model.model.set_weights = spy
+        with mock.patch("dnn_dk1.model.MAX_EPOCHS", 5):
+            model.fit(X, Y, X, Y)
+
+        self.assertIn("weights", captured, "fit() never restored any weights")
+        for kept, installed in zip(captured["weights"], model.model.get_weights()):
+            np.testing.assert_allclose(kept, installed)
 
 
 class TestSeeding(unittest.TestCase):
