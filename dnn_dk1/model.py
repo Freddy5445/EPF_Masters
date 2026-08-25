@@ -104,11 +104,20 @@ class DNNModel:
         self.model.compile(loss=loss, optimizer=opt)
 
     def _reg(self, lambda_reg):
-        """An l1 or l2 regularizer, or None. Same semantics as upstream."""
+        """An l1 or l2 regularizer, or None. Same semantics as upstream.
+
+        ``lambda_reg`` comes from hyperopt's own sampling as a numpy float64.
+        Some Keras 3 point releases store that on the regularizer as-is and
+        later multiply it against a layer's float32 weights with no cast,
+        which TF's strict op typing rejects (`Mul` on float64 x float32). A
+        plain Python float is weakly typed and combines with any tensor
+        dtype, so casting here is version-proof rather than relying on a
+        particular Keras release's own guard.
+        """
         if self.regularization == 'l2':
-            return l2(lambda_reg)
+            return l2(float(lambda_reg))
         if self.regularization == 'l1':
-            return l1(lambda_reg)
+            return l1(float(lambda_reg))
         return None
 
     def _build_model(self):

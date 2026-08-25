@@ -79,6 +79,24 @@ class TestArchitecture(unittest.TestCase):
             model = DNNModel(neurons=[8], n_features=5, regularization=kind)
             self.assertIsNotNone(model._reg(0.1))
 
+    def test_regularizer_accepts_a_numpy_lambda(self):
+        """hyperopt's own sampling hands back numpy float64, not a Python float.
+
+        Some Keras 3 point releases store that on the regularizer as-is and
+        later multiply it against a layer's float32 weights with no cast,
+        raising `TypeError: ... type float32 ... does not match type
+        float64`. Exercising __call__ against a real float32 tensor is what
+        catches that -- checking the regularizer's type alone would not.
+        """
+        import keras
+
+        for kind in ("l1", "l2"):
+            model = DNNModel(neurons=[8], n_features=5, regularization=kind)
+            reg = model._reg(np.float64(0.01))
+            weights = keras.ops.ones((4, 4), dtype="float32")
+            penalty = reg(weights)  # must not raise TypeError
+            self.assertGreater(float(penalty), 0.0)
+
     def test_dropout_outside_zero_one_is_rejected(self):
         for bad in (-0.1, 1.5):
             with self.assertRaises(ValueError):
