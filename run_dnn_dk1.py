@@ -153,8 +153,8 @@ def main(argv=None):
     if args.data_start:
         data = data.loc[pd.Timestamp(args.data_start):]
 
-    # Cleaning is not this script's job: it happens once in data_cleaning.ipynb
-    # via the `cleaning` package, so the DNN and LEAR provably read identically
+    # Cleaning is not this script's job: it happens once in section 7 of
+    # data_cleaning.ipynb, so the DNN and LEAR provably read identically
     # prepared inputs. Filling gaps here too would re-create the two divergent
     # implementations the refactor removed.
     if data.isna().any().any():
@@ -272,7 +272,7 @@ def main(argv=None):
         "hyperopt_evals": max_evals,
         "hyperopt_range": [str(hyperopt_begin.date()), str(hyperopt_end.date())],
         "data_start": str(data.index.min()),
-        "cleaning": "data_cleaning.ipynb (cleaning package)",
+        "cleaning": "data_cleaning.ipynb",
         "seconds_per_recalibration": round(
             sum(timings) / max(len(timings), 1), 1),
     }

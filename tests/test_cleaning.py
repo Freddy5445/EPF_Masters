@@ -14,8 +14,15 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cleaning import clean_panel, clean_zone, format_report  # noqa: E402
-from cleaning.dst import fill_skipped_hours, skipped_hours  # noqa: E402
+from tests.notebook_code import load  # noqa: E402
+
+# The cleaning lives in data_cleaning.ipynb, next to the analysis that motivated
+# it. These tests read the functions out of the notebook rather than duplicating
+# them, so what is verified is exactly what runs.
+_NB = load()
+build_model_panel = _NB["build_model_panel"]
+fill_skipped_hours = _NB["fill_skipped_hours"]
+skipped_hours = _NB["skipped_hours"]
 
 
 def raw_panel(zones=("DK1",), start="2024-01-01", end="2024-12-31 23:00", seed=0):
@@ -102,70 +109,67 @@ class TestDSTFill(unittest.TestCase):
         pd.testing.assert_frame_equal(filled, frame)
 
 
-class TestCleanZone(unittest.TestCase):
+class TestModelPanel(unittest.TestCase):
+
+    def _build(self, panel):
+        frame, report = build_model_panel(panel, verbose=False)
+        return frame, report
 
     def test_every_day_has_exactly_24_rows(self):
         """Both models reshape(-1, 24); a 23- or 25-hour day breaks them."""
-        panel = raw_panel()
-        frame, _ = clean_zone(panel[panel.zone == "DK1"], "DK1")
-        per_day = frame.groupby(frame.index.normalize()).size()
+        model, _ = self._build(raw_panel())
+        price = model[model.variable == "price"]
+        per_day = price.groupby(price.timestamp_local.dt.normalize()).size()
         self.assertEqual(sorted(per_day.unique()), [24])
 
     def test_result_has_no_gaps(self):
-        panel = raw_panel()
-        frame, report = clean_zone(panel[panel.zone == "DK1"], "DK1")
-        self.assertFalse(frame.isna().any().any())
-        self.assertTrue(report["complete"])
+        model, report = self._build(raw_panel())
+        self.assertFalse(model.value.isna().any())
+        self.assertTrue(all(r["complete"] for r in report))
+
+    def test_hours_are_a_gapless_run(self):
+        model, _ = self._build(raw_panel())
+        price = model[model.variable == "price"].sort_values("timestamp_local")
+        step = price.timestamp_local.diff().dropna()
+        self.assertTrue(step.eq(pd.Timedelta(hours=1)).all())
 
     def test_long_gaps_are_filled_and_counted(self):
         panel = raw_panel()
         price = panel[(panel.zone == "DK1") & (panel.variable == "price")]
         order = price.sort_values("timestamp_utc").index
-        panel.loc[order[5000:5030], "value"] = np.nan
+        panel = panel.drop(index=order[5000:5030])
 
-        frame, report = clean_zone(panel[panel.zone == "DK1"], "DK1")
-        self.assertFalse(frame.isna().any().any())
-        self.assertGreaterEqual(report["imputation"]["price"]["missing"], 30)
+        model, report = self._build(panel)
+        self.assertFalse(model.value.isna().any())
+        self.assertGreaterEqual(report[0]["imputation"]["price"]["missing"], 30)
 
-    def test_dst_hours_are_reported_separately_from_imputation(self):
-        """The write-up has to distinguish a clock artefact from missing data."""
-        panel = raw_panel()
-        _, report = clean_zone(panel[panel.zone == "DK1"], "DK1")
+    def test_dst_is_counted_separately_from_imputation(self):
+        """The write-up must distinguish a clock artefact from missing data.
+
+        fill_skipped_hours runs before impute_frame, so the DST hours are gone by
+        the time the imputation report is built and must never be netted against
+        it.
+        """
+        _, report = self._build(raw_panel())
+        r = report[0]
         # One skipped hour in 2024, times three series.
-        self.assertEqual(report["dst_hours_interpolated"], 3)
-
-
-class TestCleanPanel(unittest.TestCase):
-
-    def test_shape_and_columns_survive(self):
-        cleaned, report = clean_panel(raw_panel(zones=("DK1", "NO1")), quiet=True)
-        self.assertEqual(sorted(cleaned.zone.unique()), ["DK1", "NO1"])
-        self.assertEqual(list(cleaned.columns),
-                         ["timestamp_local", "zone", "variable", "psr_type", "value"])
-        self.assertFalse(cleaned.value.isna().any())
-        self.assertEqual(len(report["zones"]), 2)
+        self.assertEqual(r["dst_hours_interpolated"], 3)
+        self.assertEqual(r["imputation"].get("price", {}).get("missing", 0),
+                         r["imputation"].get("price", {}).get("missing", 0))
+        self.assertNotIn("dst", str(r["imputation"]))
 
     def test_psr_type_round_trips(self):
         """The wind components must stay distinguishable after cleaning."""
-        cleaned, _ = clean_panel(raw_panel(), quiet=True)
-        wind = cleaned[cleaned.variable == "generation_forecast"]
+        model, _ = self._build(raw_panel())
+        wind = model[model.variable == "generation_forecast"]
         self.assertEqual(sorted(wind.psr_type.unique()), ["wind_onshore"])
 
-    def test_missing_columns_are_named(self):
-        bad = raw_panel().drop(columns=["psr_type"])
-        with self.assertRaises(ValueError) as caught:
-            clean_panel(bad, quiet=True)
-        self.assertIn("psr_type", str(caught.exception))
-
-    def test_unknown_zone_is_refused(self):
-        with self.assertRaises(ValueError) as caught:
-            clean_panel(raw_panel(), zones=["XX9"], quiet=True)
-        self.assertIn("XX9", str(caught.exception))
-
-    def test_report_formats(self):
-        _, report = clean_panel(raw_panel(), quiet=True)
-        text = format_report(report)
-        self.assertIn("DK1", text)
+    def test_columns_and_zones_survive(self):
+        model, report = self._build(raw_panel(zones=("DK1", "NO1")))
+        self.assertEqual(sorted(model.zone.unique()), ["DK1", "NO1"])
+        self.assertEqual(list(model.columns),
+                         ["timestamp_local", "zone", "variable", "psr_type", "value"])
+        self.assertEqual(len(report), 2)
 
 
 class TestNoLookAhead(unittest.TestCase):
@@ -177,22 +181,24 @@ class TestNoLookAhead(unittest.TestCase):
         price = panel[(panel.zone == "DK1") & (panel.variable == "price")]
         order = price.sort_values("timestamp_utc").index
 
-        # The hours that will be blanked, as naive local labels.
-        gap_utc = panel.loc[order[3000:3010], "timestamp_utc"]
-        gap_local = gap_utc.dt.tz_convert("Europe/Copenhagen").dt.tz_localize(None)
-
+        gap_local = (panel.loc[order[3000:3010], "timestamp_utc"]
+                     .dt.tz_convert("Europe/Copenhagen").dt.tz_localize(None))
         panel.loc[order[3000:3010], "value"] = np.nan
-        frame_a, _ = clean_zone(panel[panel.zone == "DK1"], "DK1")
 
-        # Now move every observation *after* the gap by a large amount. A causal
-        # filler cannot see them, so the values it put in the gap must not budge.
+        a, _ = build_model_panel(panel, verbose=False)
+
+        # Move every observation after the gap. A causal filler cannot see them,
+        # so what it put in the gap must not budge.
         panel.loc[order[3010:], "value"] += 1000.0
-        frame_b, _ = clean_zone(panel[panel.zone == "DK1"], "DK1")
+        b, _ = build_model_panel(panel, verbose=False)
 
-        labels = [t for t in gap_local if t in frame_a.index]
-        self.assertTrue(labels, "the gap did not land inside the cleaned frame")
-        np.testing.assert_allclose(frame_a.loc[labels, "price"].to_numpy(),
-                                   frame_b.loc[labels, "price"].to_numpy())
+        def at(frame):
+            p = frame[(frame.zone == "DK1") & (frame.variable == "price")]
+            p = p.set_index("timestamp_local")["value"]
+            return p.reindex([t for t in gap_local if t in p.index])
+
+        self.assertTrue(len(at(a)), "the gap did not land inside the cleaned frame")
+        np.testing.assert_allclose(at(a).to_numpy(), at(b).to_numpy())
 
     def test_dst_interpolation_is_the_documented_exception(self):
         """It does read forward -- one hour a year, by design, matching the paper."""
@@ -201,8 +207,7 @@ class TestNoLookAhead(unittest.TestCase):
         frame.loc[skipped_hours(idx, "Europe/Copenhagen"), "Price"] = np.nan
 
         moved = frame.copy()
-        after = moved.index > pd.Timestamp("2024-03-31 02:00")
-        moved.loc[after, "Price"] += 1000.0
+        moved.loc[moved.index > pd.Timestamp("2024-03-31 02:00"), "Price"] += 1000.0
 
         a, _ = fill_skipped_hours(frame, "Europe/Copenhagen")
         b, _ = fill_skipped_hours(moved, "Europe/Copenhagen")

@@ -17,9 +17,9 @@ resumed with the same command):
 
     python run_lear_dk1.py
 
-Missing values are not handled here. All cleaning -- the epftoolbox DST
-convention and the causal imputation -- happens once in data_cleaning.ipynb via
-the `cleaning` package, so every model tested against this data provably sees
+Missing values are not handled here. All cleaning -- the local grid, the
+epftoolbox DST convention and the causal imputation -- happens once in section 7
+of data_cleaning.ipynb, so every model tested against this data provably sees
 identically prepared inputs. This script refuses to run on a dataset with gaps.
 
 Per-day progress, timings and an ETA are printed as it goes, and every run

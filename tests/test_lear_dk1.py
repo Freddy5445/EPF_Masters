@@ -23,6 +23,11 @@ from lear_dk1.compat import (  # noqa: E402
     LEARCompat, minimum_calibration_window, n_features,
 )
 import run_lear_dk1  # noqa: E402
+from tests.notebook_code import load  # noqa: E402
+
+# Imputation lives in data_cleaning.ipynb; read it from there so the tests
+# verify what actually runs rather than a second copy.
+_NB = load()
 
 HOURS = [f"h{h}" for h in range(24)]
 
@@ -247,7 +252,7 @@ class TestImputation(unittest.TestCase):
 
     def test_no_lookahead_across_a_long_gap(self):
         """The decisive test: a gap ending exactly where the level jumps."""
-        from cleaning.impute import impute_frame
+        impute_frame = _NB["impute_frame"]
 
         gappy = self.step_frame(jump_at=1080)
         gappy.iloc[1000:1080] = np.nan
@@ -263,7 +268,7 @@ class TestImputation(unittest.TestCase):
         self.assertGreater(leaky.max(), 100)
 
     def test_no_lookahead_for_short_gaps(self):
-        from cleaning.impute import impute_frame
+        impute_frame = _NB["impute_frame"]
 
         gappy = self.step_frame(jump_at=1002)
         gappy.iloc[1000:1002] = np.nan
@@ -272,7 +277,7 @@ class TestImputation(unittest.TestCase):
         self.assertLess(filled["Price"].iloc[1000:1002].max(), 100)
 
     def test_short_gaps_carry_forward_and_long_gaps_use_an_earlier_week(self):
-        from cleaning.impute import impute_frame
+        impute_frame = _NB["impute_frame"]
 
         gappy = self.periodic_frame()
         gappy.iloc[100:102] = np.nan     # 2h  -> carry forward
@@ -284,7 +289,7 @@ class TestImputation(unittest.TestCase):
 
     def test_long_gap_preserves_the_daily_shape(self):
         """Carrying one value forward for days would flatten the cycle."""
-        from cleaning.impute import impute_frame
+        impute_frame = _NB["impute_frame"]
 
         truth = self.periodic_frame()
         gappy = truth.copy()
@@ -297,7 +302,7 @@ class TestImputation(unittest.TestCase):
 
     def test_hours_with_no_history_are_left_unfilled(self):
         """They cannot be filled causally, so they must not be invented."""
-        from cleaning.impute import impute_frame
+        impute_frame = _NB["impute_frame"]
 
         gappy = self.periodic_frame()
         gappy.iloc[0:30] = np.nan
@@ -308,7 +313,8 @@ class TestImputation(unittest.TestCase):
 
     def test_first_complete_day_lands_on_midnight(self):
         """Trimming must preserve the 24-rows-per-day grid."""
-        from cleaning.impute import first_complete_day, impute_frame
+        first_complete_day = _NB["first_complete_day"]
+        impute_frame = _NB["impute_frame"]
 
         gappy = self.periodic_frame()
         gappy.iloc[0:30] = np.nan
@@ -319,7 +325,7 @@ class TestImputation(unittest.TestCase):
         self.assertFalse(filled.loc[start:].isna().any().any())
 
     def test_complete_column_is_left_alone(self):
-        from cleaning.impute import impute_frame
+        impute_frame = _NB["impute_frame"]
 
         truth = self.periodic_frame(days=30)
         filled, report = impute_frame(truth)

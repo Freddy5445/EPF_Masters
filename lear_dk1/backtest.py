@@ -276,8 +276,8 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
                 f"{test_start}; there would be no training data."
             )
 
-    # Cleaning is not this script's job any more. It happens once, in
-    # data_cleaning.ipynb via the `cleaning` package, so that every model tested
+    # Cleaning is not this script's job any more. It happens once, in section 7
+    # of data_cleaning.ipynb, so that every model tested
     # against this data provably sees identically prepared inputs -- a difference
     # between LEAR and the DNN is then a difference between the models. Filling
     # gaps here as well would re-create two implementations that can drift apart.
@@ -323,7 +323,7 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
         "data_start": str(data_start) if data_start is not None else None,
         # What fraction of the input was invented, and how -- needed to report
         # the result honestly.
-        "cleaning": "data_cleaning.ipynb (cleaning package)",
+        "cleaning": "data_cleaning.ipynb",
         "environment": environment_metadata(),
         "started_at": pd.Timestamp.now().isoformat(),
         "windows": [],
