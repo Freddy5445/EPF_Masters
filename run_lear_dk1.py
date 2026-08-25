@@ -17,10 +17,10 @@ resumed with the same command):
 
     python run_lear_dk1.py
 
-Missing values are imputed here rather than at download time, so that how gaps
-are filled stays a stated modelling choice: short gaps linearly, longer ones
-from the same hour in the nearest week. Every run records how much of its input
-was imputed, and by which method, in run_metadata.json.
+Missing values are not handled here. All cleaning -- the epftoolbox DST
+convention and the causal imputation -- happens once in data_cleaning.ipynb via
+the `cleaning` package, so every model tested against this data provably sees
+identically prepared inputs. This script refuses to run on a dataset with gaps.
 
 Per-day progress, timings and an ETA are printed as it goes, and every run
 writes forecasts, per-day timings and a JSON manifest under experiments/.
@@ -78,13 +78,6 @@ def main(argv=None):
                         help=f"Last test day inclusive, YYYY-MM-DD "
                              f"(default: {DEFAULT_END_TEST}, where DK1 hourly "
                              f"day-ahead data ends)")
-    parser.add_argument("--no-impute", action="store_true",
-                        help="Fail instead of filling missing values. LEAR cannot "
-                             "be fitted on NaN, so this only reports the problem.")
-    parser.add_argument("--max-linear", type=int, default=3,
-                        help="Longest gap to fill by linear interpolation, in "
-                             "hours (default 3). Longer gaps use the same hour "
-                             "from the nearest available week.")
     parser.add_argument("--windows", default=",".join(str(w) for w in DEFAULT_WINDOWS),
                         help="Comma-separated calibration windows in days "
                              f"(default: {','.join(str(w) for w in DEFAULT_WINDOWS)})")
@@ -167,8 +160,6 @@ def main(argv=None):
             out_dir=args.out_dir,
             run_name=run_name,
             data_start=pd.Timestamp(args.data_start) if args.data_start else None,
-            impute=not args.no_impute,
-            max_linear=args.max_linear,
             quiet=args.quiet,
         )
     except (IOError, OSError) as exc:
@@ -185,10 +176,9 @@ def main(argv=None):
         # window floor after, say, a NaN error sends the reader the wrong way.
         lowered = message.lower()
         if "contains nan" in lowered or "missing value" in lowered:
-            print(f"\nThe dataset has gaps that were not filled. Imputation runs "
-                  f"by default; if --no-impute was passed, drop it. Otherwise the "
-                  f"installed code may predate imputation being added -- check "
-                  f"that lear_dk1/impute.py exists and pull if not.", file=sys.stderr)
+            print(f"\nRe-run data_cleaning.ipynb to rebuild the cleaned panel, "
+                  f"then rebuild this CSV with run_lear_from_clean.py.",
+                  file=sys.stderr)
         elif "calibration_window" in lowered:
             print(f"\nMinimum window is {minimum_calibration_window()} days, the "
                   f"shortest window Lago et al. (2021) run LEAR on.", file=sys.stderr)

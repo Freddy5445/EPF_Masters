@@ -33,9 +33,6 @@ os.environ.setdefault("KERAS_BACKEND", "tensorflow")
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from lear_dk1.impute import (  # noqa: E402
-    first_complete_day, format_report, impute_frame,
-)
 # Private, but shared on purpose: the resume semantics -- in particular that an
 # incomplete final row is discarded rather than trusted -- must match the LEAR
 # backtest's, or the two models would recover differently from an interruption.
@@ -86,13 +83,6 @@ def main(argv=None):
                         help="Comma-separated seeds; the ensemble averages them")
     parser.add_argument("--skip-hyperopt", action="store_true",
                         help="Reuse an existing trials file instead of searching")
-    parser.add_argument("--no-impute", action="store_true",
-                        help="Fail instead of filling missing values. The DNN "
-                             "cannot be fitted on NaN, so this only reports them.")
-    parser.add_argument("--max-linear", type=int, default=3,
-                        help="Longest gap to forward-fill, in hours (default 3). "
-                             "Matches run_lear_dk1.py, so both models see the "
-                             "same inputs.")
     parser.add_argument("--no-evaluate", action="store_true",
                         help="Skip scoring; write the forecasts only")
     parser.add_argument("--smoke", action="store_true",
@@ -163,37 +153,18 @@ def main(argv=None):
     if args.data_start:
         data = data.loc[pd.Timestamp(args.data_start):]
 
-    # Impute exactly as the LEAR path does, with the same module and the same
-    # default. Both models must see identically prepared inputs, or a difference
-    # in their scores could be a difference in data handling rather than in the
-    # models. Every filled value comes from earlier observations only.
-    imputation, trimmed_no_history = None, 0
+    # Cleaning is not this script's job: it happens once in data_cleaning.ipynb
+    # via the `cleaning` package, so the DNN and LEAR provably read identically
+    # prepared inputs. Filling gaps here too would re-create the two divergent
+    # implementations the refactor removed.
     if data.isna().any().any():
-        if args.no_impute:
-            counts = data.isna().sum()
-            print(f"error: the dataset has missing values "
-                  f"{counts[counts > 0].to_dict()} and --no-impute was given. "
-                  f"The DNN cannot be fitted on NaN.", file=sys.stderr)
-            return 1
-
-        data, imputation = impute_frame(data, max_ffill=args.max_linear)
-        print("Imputed missing values (past observations only):")
-        print(format_report(imputation, len(data)))
-
-        # Causal imputation cannot fill hours with no history behind them, so
-        # those are dropped rather than invented.
-        if data.isna().any().any():
-            usable_from = first_complete_day(data)
-            trimmed_no_history = int((data.index < usable_from).sum())
-            data = data.loc[usable_from:]
-            print(f"  Trimmed {trimmed_no_history:,} leading hour(s) with no "
-                  f"history to impute from; data now starts {usable_from}")
-            if data.empty or usable_from >= begin_test:
-                print(f"error: after dropping unfillable leading hours the data "
-                      f"starts at {usable_from}, at or after the test start "
-                      f"{begin_test}. Raise --data-start.", file=sys.stderr)
-                return 1
-        print()
+        counts = data.isna().sum()
+        print(f"error: the dataset has missing values "
+              f"{counts[counts > 0].to_dict()}. The DNN cannot be fitted on NaN, "
+              f"and this script no longer imputes.", file=sys.stderr)
+        print("Re-run data_cleaning.ipynb, then rebuild the CSV with "
+              "run_lear_from_clean.py.", file=sys.stderr)
+        return 1
 
     days = pd.date_range(begin_test, end_test, freq="D")
     print(f"Forecasting {len(days)} day(s), {len(seeds)} seed(s), "
@@ -301,13 +272,7 @@ def main(argv=None):
         "hyperopt_evals": max_evals,
         "hyperopt_range": [str(hyperopt_begin.date()), str(hyperopt_end.date())],
         "data_start": str(data.index.min()),
-        "imputation": {
-            "applied": imputation is not None,
-            "causal": True,
-            "max_forward_fill_hours": args.max_linear,
-            "trimmed_leading_hours_no_history": trimmed_no_history,
-            "columns": imputation or {},
-        },
+        "cleaning": "data_cleaning.ipynb (cleaning package)",
         "seconds_per_recalibration": round(
             sum(timings) / max(len(timings), 1), 1),
     }
