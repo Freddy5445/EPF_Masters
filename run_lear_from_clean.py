@@ -2,7 +2,9 @@
 Run the LEAR backtest on a zone taken from the cleaned hourly panel.
 
 ``data_cleaning.ipynb`` writes ``datasets/nordic_baltic_clean_hourly.parquet``: every
-Nordic/Baltic series in one long, UTC, uniformly hourly table. ``run_lear_dk1.py`` reads
+Nordic/Baltic series in one long table, already on naive local market time with 24
+rows per calendar day and no gaps -- all cleaning happens there, so every model
+reads identically prepared inputs. ``run_lear_dk1.py`` reads
 the epftoolbox layout instead -- one CSV per zone, naive local time, price first and the
 exogenous inputs after it. This script is the bridge, and nothing more: it projects one
 zone out of the panel into that CSV and then hands over to ``run_lear_dk1.main()``, so
@@ -25,12 +27,11 @@ import argparse
 import os
 import sys
 
-import numpy as np
 import pandas as pd
 
 import run_lear_dk1
 from entsoe_tp.areas import lookup
-from entsoe_tp.hourly import assert_epftoolbox_grid, to_local_hourly_grid
+from entsoe_tp.hourly import assert_epftoolbox_grid
 from lear_dk1.compat import minimum_calibration_window
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -72,12 +73,13 @@ def dataset_name_for(zone, layout):
 
 
 def series_for(panel, zone, variable, psr_types):
-    """One UTC series for a column spec, summing the production types it names.
+    """One local-time series for a column spec, summing the production types it names.
 
     Summing is done across columns rather than by grouping rows so that a missing
-    component makes the sum missing. A wind total that silently means "onshore only"
-    for the hours offshore was not published would be a quiet lie about the level;
-    left as NaN it is a gap, which the imputation in lear_dk1 fills causally and counts.
+    component would make the sum missing rather than silently mean "onshore only".
+    The cleaned panel has no gaps, so this should never fire -- but if the notebook
+    is ever re-run with a series it could not fill, a NaN here is far better than a
+    quiet understatement of the level.
     """
     rows = panel[(panel.zone == zone) & (panel.variable == variable)]
     if psr_types is not None:
@@ -89,18 +91,33 @@ def series_for(panel, zone, variable, psr_types):
     if rows.empty:
         return None, psr_types or [variable]
 
-    wide = rows.pivot_table(index="timestamp_utc", columns="psr_type", values="value")
+    wide = rows.pivot_table(index="timestamp_local", columns="psr_type", values="value")
     total = wide.sum(axis=1, min_count=wide.shape[1])
     return total.sort_index(), missing
 
 
 def build_csv(panel_path, zone, layout, out_dir, dataset_name, quiet=False):
-    """Project one zone out of the panel into the epftoolbox CSV layout.
+    """Project one zone out of the cleaned panel into the epftoolbox CSV layout.
 
-    Returns the local date span written, so the caller can default the test range to
-    what actually exists rather than to a hard-coded date.
+    This is a projection and nothing more. All cleaning -- the local grid, the
+    epftoolbox DST convention and the causal imputation -- happens once in
+    data_cleaning.ipynb, so every model reads identically prepared inputs. The
+    panel arrives already on naive local time with 24 rows per day and no gaps;
+    this only selects a zone, sums the production types each column names, and
+    orders the columns the way read_data binds them.
+
+    Returns the local date span written, so the caller can default the test range
+    to what actually exists.
     """
     panel = pd.read_parquet(panel_path)
+
+    if "timestamp_local" not in panel.columns:
+        raise ValueError(
+            f"{panel_path} has no timestamp_local column. It looks like the raw "
+            f"UTC panel rather than the cleaned one -- re-run section 7 of "
+            f"data_cleaning.ipynb, which builds the model-ready panel."
+        )
+
     for column in ("zone", "variable", "psr_type"):
         panel[column] = panel[column].astype("object").fillna("").astype(str)
 
@@ -136,37 +153,20 @@ def build_csv(panel_path, zone, layout, out_dir, dataset_name, quiet=False):
             f"{', '.join(LAYOUTS)}."
         )
 
-    # The panel spans whole local days by construction -- the notebook cuts it at the last
-    # hour before 15-minute prices begin -- but derive the range rather than assume it.
-    # Naive on purpose: these bound a naive local grid, and a tz-aware bound would make
-    # date_range build an aware one, which is exactly what the layout must not have.
-    span = pd.concat(columns.values(), axis=1).index
-    local = span.tz_convert(tz).tz_localize(None)
-    start_date, end_date = local.min().normalize(), local.max().normalize()
-    if local.max().hour != 23:
-        end_date -= pd.Timedelta(days=1)
-
-    # allow_gaps=True keeps this a pure projection: fall-back duplicates are averaged
-    # because a naive local grid has one 02:00 slot, but nothing is invented. Filling is
-    # lear_dk1's job, where the method is a stated choice and every filled value is counted.
-    frame = pd.DataFrame({
-        name: to_local_hourly_grid(series, tz, start_date, end_date, allow_gaps=True)
-        for name, series in columns.items()
-    })
-    assert_epftoolbox_grid(frame, allow_nan=True)
+    frame = pd.DataFrame(columns).sort_index()
+    assert_epftoolbox_grid(frame, allow_nan=False)
 
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{dataset_name}.csv")
     frame.index.name = f"Date ({tz} local time, naive, ISO 8601)"
     frame.to_csv(path, date_format="%Y-%m-%dT%H:%M:%S")
 
+    start_date = frame.index.min().normalize()
+    end_date = frame.index.max().normalize()
+
     if not quiet:
-        nan = frame.isna().sum()
         print(f"{zone}: {len(frame):,} hours, {start_date.date()} to {end_date.date()} "
               f"({len(frame) // 24:,} days), {len(frame.columns)} columns")
-        for name in frame.columns:
-            print(f"  {name:<45} {int(nan[name]):>6,} missing "
-                  f"({100 * nan[name] / len(frame):.2f}%)")
         print(f"written: {path}\n")
 
     return path, start_date, end_date

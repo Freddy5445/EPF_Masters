@@ -37,7 +37,6 @@ import numpy as np
 import pandas as pd
 
 from .compat import LEARCompat, PROJECT_ROOT, minimum_calibration_window, n_features
-from .impute import first_complete_day, format_report, impute_frame
 
 # read_data lives in a TensorFlow-free subpackage, so this import is safe.
 if os.path.join(PROJECT_ROOT, "epftoolbox") not in sys.path:
@@ -236,7 +235,7 @@ def run_window(df_train, df_test, calibration_window, run_dir, run_id,
 
 def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
                  calibration_windows, out_dir, run_name, data_start=None,
-                 impute=True, max_linear=3, quiet=False):
+                 quiet=False):
     """Backtest several calibration windows and record the whole run.
 
     ``begin_test_date`` and ``end_test_date`` must be datetime-like, not strings:
@@ -255,10 +254,8 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
         begin_test_date=begin_test_date, end_test_date=end_test_date,
     )
 
-    # Trimming and imputation are done on the whole series, then re-split at the
-    # same boundary: filling from a neighbouring week needs to see across the
-    # train/test join, and a gap at the very start of training would otherwise
-    # be filled differently than one a few rows later.
+    # read_data splits at the test boundary; rejoin so --data-start trimming and
+    # the NaN check see one continuous series, then re-split at the same point.
     combined = pd.concat([df_train, df_test], axis=0)
     test_start = df_test.index[0]
 
@@ -279,36 +276,19 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
                 f"{test_start}; there would be no training data."
             )
 
-    imputation = None
-    trimmed_no_history = 0
-    if impute and combined.isna().any().any():
-        combined, imputation = impute_frame(combined, max_ffill=max_linear)
-        if not quiet:
-            print("Imputed missing values (past observations only):")
-            print(format_report(imputation, len(combined)))
-
-        # Causal imputation cannot fill hours with no history, so those are
-        # dropped rather than invented.
-        if combined.isna().any().any():
-            usable_from = first_complete_day(combined)
-            trimmed_no_history = int((combined.index < usable_from).sum())
-            combined = combined.loc[usable_from:]
-            if not quiet:
-                print(f"  Trimmed {trimmed_no_history:,} leading hour(s) with no "
-                      f"history to impute from; data now starts {usable_from}")
-            if combined.empty or usable_from >= test_start:
-                raise ValueError(
-                    f"After dropping unfillable leading hours the data starts at "
-                    f"{usable_from}, at or after the test start {test_start}. "
-                    f"Raise --data-start."
-                )
-        if not quiet:
-            print()
-    elif combined.isna().any().any():
+    # Cleaning is not this script's job any more. It happens once, in section 7
+    # of data_cleaning.ipynb, so that every model tested
+    # against this data provably sees identically prepared inputs -- a difference
+    # between LEAR and the DNN is then a difference between the models. Filling
+    # gaps here as well would re-create two implementations that can drift apart.
+    if combined.isna().any().any():
         counts = combined.isna().sum()
         raise ValueError(
-            f"The dataset contains missing values and imputation is disabled: "
-            f"{counts[counts > 0].to_dict()}. LEAR cannot be fitted on NaN."
+            f"The dataset contains missing values {counts[counts > 0].to_dict()}. "
+            f"LEAR cannot be fitted on NaN, and this script no longer imputes. "
+            f"Re-run data_cleaning.ipynb, which applies the epftoolbox DST "
+            f"convention and the causal imputation, then rebuild the CSV with "
+            f"run_lear_from_clean.py."
         )
 
     df_train = combined.loc[:test_start - pd.Timedelta(hours=1)]
@@ -343,13 +323,7 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
         "data_start": str(data_start) if data_start is not None else None,
         # What fraction of the input was invented, and how -- needed to report
         # the result honestly.
-        "imputation": {
-            "applied": imputation is not None,
-            "causal": True,
-            "max_forward_fill_hours": max_linear,
-            "trimmed_leading_hours_no_history": trimmed_no_history,
-            "columns": imputation,
-        },
+        "cleaning": "data_cleaning.ipynb",
         "environment": environment_metadata(),
         "started_at": pd.Timestamp.now().isoformat(),
         "windows": [],
