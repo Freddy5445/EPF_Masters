@@ -46,11 +46,31 @@ ENSEMBLE = "ensemble"
 PREDICTIONS_FILE = "predictions.csv"
 
 
-def load_forecasts(run_dir):
-    """Every per-window forecast file in a run directory, keyed by window."""
+# What an ensemble member is differs by model. LEAR ensembles over calibration
+# windows; the DNN ensembles over random seeds. Everything downstream -- the
+# mean, the metrics, the DM/GW tests, the saved predictions -- is identical
+# either way, so the two models are scored by the same code and their numbers
+# are directly comparable.
+MEMBER_KINDS = {
+    "window": ("forecasts_cw", "cw"),
+    "seed": ("forecasts_seed", "seed"),
+}
+
+
+def load_forecasts(run_dir, kind=None):
+    """Per-member forecast files in a run directory.
+
+    Returns ``(forecasts, label)``: forecasts keyed by the member's number, so
+    they sort numerically, and the label that names them (``cw`` or ``seed``).
+    ``kind`` defaults to whichever kind the directory actually holds.
+    """
+    if kind is None:
+        kind = detect_member_kind(run_dir)
+
+    prefix, label = MEMBER_KINDS[kind]
     forecasts = {}
-    for path in sorted(glob.glob(os.path.join(run_dir, "forecasts_cw*.csv"))):
-        match = re.search(r"forecasts_cw(\d+)\.csv$", os.path.basename(path))
+    for path in sorted(glob.glob(os.path.join(run_dir, f"{prefix}*.csv"))):
+        match = re.search(rf"{prefix}(\d+)\.csv$", os.path.basename(path))
         if not match:
             continue
         frame = pd.read_csv(path, index_col=0)
@@ -58,7 +78,21 @@ def load_forecasts(run_dir):
         # Only complete days count: a half-written final row would otherwise
         # enter the ensemble mean as a partial forecast.
         forecasts[int(match.group(1))] = frame.dropna(how="any")
-    return forecasts
+    return forecasts, label
+
+
+def detect_member_kind(run_dir):
+    """Which kind of ensemble member this run directory holds."""
+    found = [kind for kind, (prefix, _) in MEMBER_KINDS.items()
+             if glob.glob(os.path.join(run_dir, f"{prefix}*.csv"))]
+    if len(found) > 1:
+        raise ValueError(
+            f"{run_dir} holds both {' and '.join(found)} forecasts. A run is one "
+            f"model; pass kind= to say which to score."
+        )
+    # Default to windows when there is nothing, so the caller gets the usual
+    # "no forecast files" error rather than one about member kinds.
+    return found[0] if found else "window"
 
 
 def build_ensemble(forecasts):
@@ -225,7 +259,8 @@ def zone_from_dataset(dataset):
     return dataset.split("_", 1)[0]
 
 
-def evaluate_run(run_dir, dataset=None, datasets_dir=None, quiet=False, zone=None):
+def evaluate_run(run_dir, dataset=None, datasets_dir=None, quiet=False, zone=None,
+                 kind=None):
     """Score one run directory. Returns a dict; also writes ``evaluation.json``."""
     manifest_path = os.path.join(run_dir, "run_metadata.json")
     manifest = {}
@@ -241,7 +276,7 @@ def evaluate_run(run_dir, dataset=None, datasets_dir=None, quiet=False, zone=Non
             f"prices cannot be found. Pass dataset=..."
         )
 
-    forecasts = load_forecasts(run_dir)
+    forecasts, label = load_forecasts(run_dir, kind=kind)
     if not forecasts:
         raise ValueError(f"No forecast files in {run_dir}")
 
@@ -249,8 +284,8 @@ def evaluate_run(run_dir, dataset=None, datasets_dir=None, quiet=False, zone=Non
     if ensemble is None or not len(ensemble):
         raise ValueError(
             f"The windows in {run_dir} share no complete forecast day, so no "
-            f"ensemble can be formed. Windows hold: "
-            + ", ".join(f"cw{w}={len(f)}" for w, f in sorted(forecasts.items()))
+            f"ensemble can be formed. Members hold: "
+            + ", ".join(f"{label}{m}={len(f)}" for m, f in sorted(forecasts.items()))
         )
 
     index = ensemble.index
@@ -272,7 +307,8 @@ def evaluate_run(run_dir, dataset=None, datasets_dir=None, quiet=False, zone=Non
         "forecast_days": len(index),
         "first_day": str(index.min().date()),
         "last_day": str(index.max().date()),
-        "windows": sorted(forecasts),
+        "members": [f"{label}{m}" for m in sorted(forecasts)],
+        "member_kind": label,
         "unobserved_hours": int(real.isna().to_numpy().sum()),
         "days_tested": int(complete.sum()),
         "naive_weekly_mae": naive_mae,
@@ -281,18 +317,19 @@ def evaluate_run(run_dir, dataset=None, datasets_dir=None, quiet=False, zone=Non
     }
 
     results["scores"][ENSEMBLE] = score(real, ensemble, naive_mae)
-    for window, frame in sorted(forecasts.items()):
-        # Score every window on the ensemble's days, so the comparison is like
-        # for like even when one window ran further than another.
-        results["scores"][f"cw{window}"] = score(real, frame.loc[index, HOURS], naive_mae)
+    for member, frame in sorted(forecasts.items()):
+        # Score every member on the ensemble's days, so the comparison is like
+        # for like even when one member ran further than another.
+        results["scores"][f"{label}{member}"] = score(
+            real, frame.loc[index, HOURS], naive_mae)
 
     # The claim worth testing is that the ensemble beats its own members. With a
     # single window there is no such claim: the ensemble *is* that window, the loss
     # differential is identically zero, and the test statistic is 0/0.
     if len(forecasts) > 1 and complete.any():
         days = index[complete.to_numpy()]
-        for window, frame in sorted(forecasts.items()):
-            results["tests"][f"{ENSEMBLE}_vs_cw{window}"] = compare(
+        for member, frame in sorted(forecasts.items()):
+            results["tests"][f"{ENSEMBLE}_vs_{label}{member}"] = compare(
                 real.loc[days], ensemble.loc[days], frame.loc[days, HOURS])
 
     predictions = hourly_predictions(ensemble, real, zone or zone_from_dataset(dataset))
