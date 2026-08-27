@@ -25,6 +25,11 @@ _AREAS = [
     Area("SE2", "10Y1001A1001A45N", "Europe/Stockholm", "Sweden 2 (Sundsvall)"),
     Area("SE3", "10Y1001A1001A46L", "Europe/Stockholm", "Sweden 3 (Stockholm)"),
     Area("SE4", "10Y1001A1001A47J", "Europe/Stockholm", "Sweden 4 (Malmo)"),
+    # Sweden as a single control area. Installed capacity is published at this
+    # level as well as per bidding zone, and the country total is not always the
+    # sum of SE1-SE4: a unit sitting on a zone boundary, or one the TSO reports
+    # only nationally, appears in the country figure alone.
+    Area("SE", "10YSE-1--------K", "Europe/Stockholm", "Sweden"),
     # --- Central Western Europe -------------------------------------------
     Area("BE", "10YBE----------2", "Europe/Brussels", "Belgium"),
     Area("DE_LU", "10Y1001A1001A82H", "Europe/Berlin", "Germany-Luxembourg"),
