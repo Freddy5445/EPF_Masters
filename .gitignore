@@ -13,6 +13,7 @@ __pycache__/
 
 # csv files (datasets are not committed; see notebooks/dnn_colab.ipynb for Colab)
 *.csv
+*.xlsx
 
 # Backtest run artifacts (forecasts, timings, run manifests). These are results,
 # not source; force-add a specific run if one is worth keeping for the write-up.
