@@ -48,9 +48,6 @@ _AREAS = [
     Area("IT_NORD", "10Y1001A1001A73I", "Europe/Rome", "Italy North"),
     Area("PL", "10YPL-AREA-----S", "Europe/Warsaw", "Poland"),
     Area("CZ", "10YCZ-CEPS-----N", "Europe/Prague", "Czech Republic"),
-    Area("EE", "10Y1001A1001A39I", "Europe/Tallinn", "Estonia"),
-    Area("LV", "10YLV-1001A00074", "Europe/Riga", "Latvia"),
-    Area("LT", "10YLT-1001A0008Q", "Europe/Vilnius", "Lithuania"),
 ]
 
 AREAS = {a.code: a for a in _AREAS}

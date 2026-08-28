@@ -37,10 +37,25 @@ awkward parts appear.
 
 ## Sections 1–6: structural cleaning
 
+### Which zones
+
+The download covers the eleven Nordic bidding zones, Finland, and **DE-LU** —
+Germany-Luxembourg, the large thermal market the Nordic zones are coupled to,
+captured on the same footing as the rest rather than as an afterthought. Finland
+is dropped during cleaning; DE-LU is kept.
+
+**The Baltic zones (EE, LV, LT) are not downloaded.** Section 4 of the notebook
+shows why: after the switch to 15-minute resolution, Lithuania published flat
+quarter-hours for one to three and a half months, and Latvia never stabilised —
+LV generation dropped back to 0% varying for whole months in 2025. Rather than
+carry three zones that would have to be excluded downstream anyway, they were
+removed from `entsoe_tp.raw_dump.DEFAULT_ZONES` and from `entsoe_tp.areas`. The
+analysis rows are retained in the notebook as the record of that decision.
+
 | Step | What | Why |
 |---|---|---|
 | 1 | Drop duplicate rows on the full key | Month-chunked downloads with inclusive endpoints overlap at the joins |
-| 2 | Drop FI, EE, LT, LV | Out of scope for this study |
+| 2 | Drop Finland, and any zone `entsoe_tp.areas` no longer defines | FI is out of scope. The Baltic zones were removed from the download entirely (see below), but a raw file captured earlier still contains them, and section 7 would fail looking up a timezone for a zone the package has forgotten |
 | 3 | Drop constant and near-constant series | A series more than 90% exactly zero (e.g. `NO5 wind_onshore`) carries no information and produces a zero-MAD column that the model's scaler divides by |
 | 4 | Find the cut-off | Per zone, the last hour whose day-ahead price is still genuinely hourly — a `PT60M` stamp, or a `PT15M` hour whose four values are identical |
 | 5 | Truncate at the earliest such cut-off across zones | So no zone contributes a partial-15-minute tail |
@@ -71,10 +86,11 @@ The market trades in local time and the models index by local hour-of-day, so
 the panel is converted. Timezones come from `entsoe_tp.areas`, not a table
 restated in the notebook, so there is one definition.
 
-All eleven retained zones are CET/CEST (`Europe/Copenhagen`, `Europe/Oslo`,
-`Europe/Stockholm`), so per-zone conversion currently gives the same result as a
-single market-time conversion would. FI and the Baltics are EET/EEST — relevant
-only if they are ever restored.
+Every retained zone is CET/CEST (`Europe/Copenhagen`, `Europe/Oslo`,
+`Europe/Stockholm`, `Europe/Berlin`), so per-zone conversion currently gives the
+same result as a single market-time conversion would. Finland is EET/EEST and is
+dropped; it would matter if it were ever restored, which is why the skipped-hour
+detection asks the timezone rather than assuming 02:00.
 
 ### 2. Daylight saving
 

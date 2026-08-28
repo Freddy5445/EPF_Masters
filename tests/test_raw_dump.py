@@ -88,7 +88,7 @@ class TestShaping(unittest.TestCase):
 
     def test_empty_frame_still_has_the_schema(self):
         """An absent data item must not break the concatenation."""
-        shaped = _shape(pd.DataFrame(), "LV", "EIC", "generation_forecast",
+        shaped = _shape(pd.DataFrame(), "DE_LU", "EIC", "generation_forecast",
                         {"documentType": "A69"})
         self.assertTrue(shaped.empty)
         self.assertEqual(list(shaped.columns), COLUMNS)
@@ -134,12 +134,27 @@ class TestProductionTypesAreNotFiltered(unittest.TestCase):
 
 class TestZonesAndQueries(unittest.TestCase):
 
-    def test_all_nordic_and_baltic_zones_resolve(self):
+    def test_every_default_zone_resolves(self):
         from entsoe_tp.areas import lookup
 
-        self.assertEqual(len(DEFAULT_ZONES), 15)
+        self.assertEqual(len(DEFAULT_ZONES), 13)
         for zone in DEFAULT_ZONES:
             self.assertTrue(lookup(zone).eic)
+
+    def test_de_lu_is_captured_with_the_nordics(self):
+        """DE-LU is the market the Nordic zones are coupled to, so its price and
+        forecasts are captured on the same footing rather than separately."""
+        self.assertIn("DE_LU", DEFAULT_ZONES)
+
+    def test_the_baltic_zones_are_gone(self):
+        """Dropped for unusable 15-minute generation forecasts; see section 4 of
+        data_cleaning.ipynb. They must not come back through areas.py either, or
+        a stale reference would start resolving again."""
+        from entsoe_tp.areas import AREAS
+
+        for zone in ("EE", "LV", "LT"):
+            self.assertNotIn(zone, DEFAULT_ZONES)
+            self.assertNotIn(zone, AREAS)
 
     def test_four_data_items_are_queried(self):
         queries = _queries("EIC")
