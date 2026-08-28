@@ -299,10 +299,10 @@ def combine_parts(part_paths, out_path):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Dump raw ENTSO-E day-ahead price and forecast data for the "
-                    "Nordic and Baltic zones, preserving native resolution.")
+                    "Nordic zones and DE-LU, preserving native resolution.")
     parser.add_argument("--zones", default=",".join(DEFAULT_ZONES),
                         help="Comma-separated zone codes "
-                             f"(default: all {len(DEFAULT_ZONES)} Nordic/Baltic)")
+                             f"(default: all {len(DEFAULT_ZONES)})")
     parser.add_argument("--start", default=DEFAULT_START,
                         help=f"First day, YYYY-MM-DD (default {DEFAULT_START})")
     parser.add_argument("--end", default=DEFAULT_END,
