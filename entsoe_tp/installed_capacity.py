@@ -65,10 +65,17 @@ PSR_TYPES = {
     "B25": "Energy storage",
 }
 
-# The zones this study compares: the Nordic bidding zones it models, plus
-# Germany-Luxembourg as the large thermal neighbour whose capacity mix the
-# Nordic prices are increasingly coupled to.
-DEFAULT_ZONES = ["DK1", "DK2", "DE_LU", "NO1", "NO2", "NO3", "NO4", "NO5", "SE"]
+# The zones this study compares: the Nordic bidding zones it models, plus Germany
+# as the large thermal neighbour whose capacity mix the Nordic prices are
+# increasingly coupled to.
+#
+# Germany and Sweden are requested as *countries*, not bidding zones. Installed
+# capacity is a national statistic: the TSOs report it against the country EIC,
+# so a query against DE-LU or SE3 can come back empty where the country is
+# populated. It also means neither figure is the sum of its bidding zones -- a
+# unit on a zone boundary, or one reported only nationally, appears in the
+# country total alone.
+DEFAULT_ZONES = ["DK1", "DK2", "DE", "NO1", "NO2", "NO3", "NO4", "NO5", "SE"]
 DEFAULT_YEARS = [2015, 2020, 2025]
 
 DOCUMENT_TYPE = "A68"

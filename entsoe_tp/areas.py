@@ -33,6 +33,11 @@ _AREAS = [
     # --- Central Western Europe -------------------------------------------
     Area("BE", "10YBE----------2", "Europe/Brussels", "Belgium"),
     Area("DE_LU", "10Y1001A1001A82H", "Europe/Berlin", "Germany-Luxembourg"),
+    # Germany as a country, distinct from the DE-LU bidding zone above. Installed
+    # capacity is reported per country, and the German TSOs report it here rather
+    # than against the market area, so a capacity query for DE_LU can come back
+    # empty where DE is populated.
+    Area("DE", "10Y1001A1001A83F", "Europe/Berlin", "Germany"),
     Area("FR", "10YFR-RTE------C", "Europe/Paris", "France"),
     Area("NL", "10YNL----------L", "Europe/Amsterdam", "Netherlands"),
     Area("AT", "10YAT-APG------L", "Europe/Vienna", "Austria"),
