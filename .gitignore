@@ -21,6 +21,9 @@ experiments/
 # Claude Code local settings
 .claude/settings.local.json
 
+# Machine-local convenience notes
+activate_venv.txt
+
 # Parquet files
 *.parquet
 
