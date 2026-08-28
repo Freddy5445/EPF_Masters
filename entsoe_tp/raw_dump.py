@@ -1,5 +1,5 @@
 """
-Raw capture of day-ahead price and forecast data across the Nordic and Baltic zones.
+Raw capture of day-ahead price and forecast data across the Nordic zones and DE-LU.
 
     python -m entsoe_tp.raw_dump
 
@@ -19,7 +19,7 @@ So nothing here is normalised, resampled, aligned, imputed or rejected:
   absence is absence, not an interpolated hour.
 * **Timestamps are UTC**, as published. No local-time conversion, so no folded
   autumn hour and no nonexistent spring hour, and the same instant means the
-  same thing in all fifteen zones.
+  same thing in every zone.
 * **Nothing aborts.** A zone that publishes no solar, a data item that returns
   an empty document, a request that fails outright -- each is recorded in the
   coverage manifest and the run continues.
@@ -69,12 +69,19 @@ PROJECT_ROOT = os.path.dirname(THIS_DIR)
 DEFAULT_CACHE = os.path.join(PROJECT_ROOT, ".cache", "entsoe")
 DEFAULT_OUT = os.path.join(PROJECT_ROOT, "datasets", "nordic_baltic_raw.parquet")
 
-# Nordic and Baltic bidding zones.
+# The Nordic bidding zones, plus DE-LU. Germany-Luxembourg is the large thermal
+# market the Nordic zones are coupled to, so its price and forecasts are captured
+# on the same footing as theirs rather than treated as an afterthought.
+#
+# The Baltic zones were dropped: their wind forecasts ramp up late and
+# incompletely -- Latvia's never stabilises -- which is documented in section 4
+# of data_cleaning.ipynb.
 DEFAULT_ZONES = (
     "DK1", "DK2",
     "NO1", "NO2", "NO3", "NO4", "NO5",
     "SE1", "SE2", "SE3", "SE4",
-    "FI", "EE", "LV", "LT",
+    "FI",
+    "DE_LU",
 )
 
 DEFAULT_START = "2016-01-01"
