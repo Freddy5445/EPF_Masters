@@ -104,8 +104,26 @@ class TestZones(unittest.TestCase):
             self.assertNotIn(bidding_zone, DEFAULT_ZONES)
         self.assertNotEqual(lookup("SE").eic, lookup("SE3").eic)
 
-    def test_germany_luxembourg_is_included(self):
-        self.assertIn("DE_LU", DEFAULT_ZONES)
+    def test_germany_is_the_country_not_the_bidding_zone(self):
+        """Installed capacity is reported nationally, against the country EIC.
+
+        A query against the DE-LU market area can come back empty where Germany
+        is populated, so the two must not be confused.
+        """
+        self.assertIn("DE", DEFAULT_ZONES)
+        self.assertNotIn("DE_LU", DEFAULT_ZONES)
+        self.assertEqual(lookup("DE").eic, "10Y1001A1001A83F")
+        self.assertNotEqual(lookup("DE").eic, lookup("DE_LU").eic)
+
+    def test_the_de_lu_bidding_zone_is_still_available(self):
+        """It is what the price and load series use; only capacity moved."""
+        self.assertEqual(lookup("DE_LU").eic, "10Y1001A1001A82H")
+
+    def test_countries_and_bidding_zones_have_distinct_codes(self):
+        """A duplicated EIC would silently make two zones the same query."""
+        from entsoe_tp.areas import AREAS
+        eics = [a.eic for a in AREAS.values()]
+        self.assertEqual(len(eics), len(set(eics)))
 
     def test_default_years(self):
         self.assertEqual(DEFAULT_YEARS, [2015, 2020, 2025])
