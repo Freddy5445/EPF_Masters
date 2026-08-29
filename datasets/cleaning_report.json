@@ -1,5 +1,48 @@
 [
   {
+    "zone": "DE_LU",
+    "hours": 61344,
+    "timezone": "Europe/Berlin",
+    "dst_hours_interpolated": 35,
+    "imputation": {
+      "generation_forecast|solar": {
+        "missing": 2,
+        "share": 3.3e-05,
+        "forward_fill": 2,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 0
+      },
+      "generation_forecast|wind_offshore": {
+        "missing": 0
+      },
+      "generation_forecast|wind_onshore": {
+        "missing": 2,
+        "share": 3.3e-05,
+        "forward_fill": 2,
+        "same_hour_earlier_week": 0,
+        "same_hour_previous_day": 0,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 0
+      },
+      "load_forecast": {
+        "missing": 891,
+        "share": 0.014519,
+        "forward_fill": 2,
+        "same_hour_earlier_week": 695,
+        "same_hour_previous_day": 192,
+        "expanding_hour_median": 0,
+        "unfilled_no_history": 2
+      },
+      "price": {
+        "missing": 0
+      }
+    },
+    "trimmed_leading_hours_no_history": 24,
+    "complete": true
+  },
+  {
     "zone": "DK1",
     "hours": 85440,
     "timezone": "Europe/Copenhagen",
