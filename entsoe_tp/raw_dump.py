@@ -1,5 +1,5 @@
 """
-Raw capture of day-ahead price and forecast data across the Nordic zones and DE-LU.
+Raw capture of day-ahead price and forecast data across the Nordic zones, DE-LU and NL.
 
     python -m entsoe_tp.raw_dump
 
@@ -69,9 +69,10 @@ PROJECT_ROOT = os.path.dirname(THIS_DIR)
 DEFAULT_CACHE = os.path.join(PROJECT_ROOT, ".cache", "entsoe")
 DEFAULT_OUT = os.path.join(PROJECT_ROOT, "datasets", "nordic_baltic_raw.parquet")
 
-# The Nordic bidding zones, plus DE-LU. Germany-Luxembourg is the large thermal
-# market the Nordic zones are coupled to, so its price and forecasts are captured
-# on the same footing as theirs rather than treated as an afterthought.
+# The Nordic bidding zones, plus DE-LU and NL. Germany-Luxembourg and the
+# Netherlands are large thermal/interconnected markets the Nordic zones are
+# coupled to, so their price and forecasts are captured on the same footing as
+# the Nordics' rather than treated as an afterthought.
 #
 # The Baltic zones were dropped: their wind forecasts ramp up late and
 # incompletely -- Latvia's never stabilises -- which is documented in section 4
@@ -82,6 +83,7 @@ DEFAULT_ZONES = (
     "SE1", "SE2", "SE3", "SE4",
     "FI",
     "DE_LU",
+    "NL",
 )
 
 DEFAULT_START = "2016-01-01"

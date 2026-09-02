@@ -6,6 +6,20 @@ RESTful API, for any European bidding zone and date range.
 Self-contained: nothing here imports or modifies the vendored `epftoolbox/` tree or
 `get_nordpool_data.py`.
 
+## Quick start: fetch everything
+
+Once you have a token (see below), this single command downloads the full raw
+dump — every default zone, 2016-01-01 through 2025-10-01 inclusive:
+
+```bash
+python -m entsoe_tp.raw_dump
+```
+
+It resumes safely if interrupted or re-run, so it's always safe to re-type. See
+[Raw multi-zone dump](#raw-multi-zone-dump) below for what it covers, and
+[Usage](#usage) for `build_dataset`, which builds one zone's `epftoolbox`-ready
+CSV instead of the raw study dump.
+
 ## Getting a security token
 
 API access is not automatic — it takes a few days.
@@ -158,9 +172,14 @@ completeness change across zones and over time — use the raw dump instead:
 python -m entsoe_tp.raw_dump
 ```
 
-Covers all 15 Nordic and Baltic zones (`DK1`, `DK2`, `NO1`–`NO5`, `SE1`–`SE4`,
-`FI`, `EE`, `LV`, `LT`) from 2016-01-01 to 2025-10-01 inclusive, and deliberately
-does the opposite of `build_dataset`:
+Covers 14 zones by default — `DK1`, `DK2`, `NO1`–`NO5`, `SE1`–`SE4`, `FI`,
+`DE_LU`, `NL` — from 2016-01-01 to 2025-10-01 inclusive (`entsoe_tp.raw_dump.DEFAULT_ZONES`).
+The Baltic zones (`EE`, `LV`, `LT`) are deliberately excluded; see section 4 of
+`data_cleaning.ipynb` for why. Pass `--zones` to fetch a different set without
+touching the default, e.g. `--zones DK1,DE_LU,FR`, or add a code permanently by
+editing `DEFAULT_ZONES` — any zone `entsoe_tp.areas` defines works.
+
+`raw_dump` deliberately does the opposite of `build_dataset`:
 
 | `build_dataset` | `raw_dump` |
 |---|---|

@@ -333,19 +333,10 @@
   },
   {
     "zone": "SE1",
-    "hours": 33576,
+    "hours": 85392,
     "timezone": "Europe/Stockholm",
-    "dst_hours_interpolated": 44,
+    "dst_hours_interpolated": 40,
     "imputation": {
-      "generation_forecast|solar": {
-        "missing": 51960,
-        "share": 0.607975,
-        "forward_fill": 0,
-        "same_hour_earlier_week": 72,
-        "same_hour_previous_day": 0,
-        "expanding_hour_median": 0,
-        "unfilled_no_history": 51888
-      },
       "generation_forecast|wind_onshore": {
         "missing": 193,
         "share": 0.002258,
@@ -377,24 +368,15 @@
         "unfilled_no_history": 72
       }
     },
-    "trimmed_leading_hours_no_history": 51888,
+    "trimmed_leading_hours_no_history": 72,
     "complete": true
   },
   {
     "zone": "SE2",
-    "hours": 33576,
+    "hours": 85392,
     "timezone": "Europe/Stockholm",
-    "dst_hours_interpolated": 44,
+    "dst_hours_interpolated": 40,
     "imputation": {
-      "generation_forecast|solar": {
-        "missing": 51960,
-        "share": 0.607975,
-        "forward_fill": 0,
-        "same_hour_earlier_week": 72,
-        "same_hour_previous_day": 0,
-        "expanding_hour_median": 0,
-        "unfilled_no_history": 51888
-      },
       "generation_forecast|wind_onshore": {
         "missing": 193,
         "share": 0.002258,
@@ -426,24 +408,15 @@
         "unfilled_no_history": 72
       }
     },
-    "trimmed_leading_hours_no_history": 51888,
+    "trimmed_leading_hours_no_history": 72,
     "complete": true
   },
   {
     "zone": "SE3",
-    "hours": 33576,
+    "hours": 85392,
     "timezone": "Europe/Stockholm",
-    "dst_hours_interpolated": 44,
+    "dst_hours_interpolated": 40,
     "imputation": {
-      "generation_forecast|solar": {
-        "missing": 51960,
-        "share": 0.607975,
-        "forward_fill": 0,
-        "same_hour_earlier_week": 72,
-        "same_hour_previous_day": 0,
-        "expanding_hour_median": 0,
-        "unfilled_no_history": 51888
-      },
       "generation_forecast|wind_onshore": {
         "missing": 193,
         "share": 0.002258,
@@ -475,24 +448,15 @@
         "unfilled_no_history": 72
       }
     },
-    "trimmed_leading_hours_no_history": 51888,
+    "trimmed_leading_hours_no_history": 72,
     "complete": true
   },
   {
     "zone": "SE4",
-    "hours": 33576,
+    "hours": 85392,
     "timezone": "Europe/Stockholm",
-    "dst_hours_interpolated": 44,
+    "dst_hours_interpolated": 40,
     "imputation": {
-      "generation_forecast|solar": {
-        "missing": 51960,
-        "share": 0.607975,
-        "forward_fill": 0,
-        "same_hour_earlier_week": 72,
-        "same_hour_previous_day": 0,
-        "expanding_hour_median": 0,
-        "unfilled_no_history": 51888
-      },
       "generation_forecast|wind_onshore": {
         "missing": 193,
         "share": 0.002258,
@@ -524,7 +488,7 @@
         "unfilled_no_history": 72
       }
     },
-    "trimmed_leading_hours_no_history": 51888,
+    "trimmed_leading_hours_no_history": 72,
     "complete": true
   }
 ]
