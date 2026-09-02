@@ -55,8 +55,10 @@ Requires ``pyarrow`` (see requirements.txt).
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
+import uuid
 
 import pandas as pd
 
@@ -134,6 +136,8 @@ CATEGORICAL = [
     "zone", "eic", "variable", "document_type", "process_type", "resolution",
     "psr_type", "business_type", "curve_type", "contract_type", "unit", "currency",
 ]
+
+ROW_KEY = ["zone", "variable", "psr_type", "resolution", "timestamp_utc"]
 
 
 def _shape(frame, zone, eic, variable, params):
@@ -296,6 +300,151 @@ def combine_parts(part_paths, out_path):
             writer.close()
 
     return total
+
+
+def merge_requery(existing, fetched):
+    """Add only previously absent series-hour keys and report value conflicts."""
+    if fetched.empty:
+        return existing.copy(), fetched.copy(), pd.DataFrame(
+            columns=ROW_KEY + ["existing_value", "queried_value"])
+
+    missing_columns = set(COLUMNS) - set(fetched.columns)
+    if missing_columns:
+        raise ValueError(f"queried rows lack columns: {sorted(missing_columns)}")
+
+    queried = fetched[COLUMNS].copy()
+    queried["timestamp_utc"] = pd.to_datetime(queried["timestamp_utc"], utc=True)
+    distinct = queried.drop_duplicates(ROW_KEY + ["value"])
+    ambiguous = distinct.duplicated(ROW_KEY, keep=False)
+    if ambiguous.any():
+        keys = distinct.loc[ambiguous, ROW_KEY].drop_duplicates()
+        raise ValueError(f"query returned conflicting values for {len(keys)} key(s)")
+    queried = distinct.drop_duplicates(ROW_KEY)
+
+    old_values = existing[ROW_KEY + ["value"]].drop_duplicates()
+    overlaps = queried.merge(old_values, on=ROW_KEY, how="inner",
+                             suffixes=("_queried", "_existing"))
+    equal = overlaps["value_queried"].eq(overlaps["value_existing"])
+    equal |= overlaps[["value_queried", "value_existing"]].isna().all(axis=1)
+    conflicts = overlaps.loc[~equal, ROW_KEY + ["value_existing", "value_queried"]] \
+                        .rename(columns={"value_existing": "existing_value",
+                                         "value_queried": "queried_value"})
+
+    old_keys = pd.MultiIndex.from_frame(existing[ROW_KEY])
+    queried_keys = pd.MultiIndex.from_frame(queried[ROW_KEY])
+    additions = queried.loc[~queried_keys.isin(old_keys)].copy()
+    merged = pd.concat([existing, additions], ignore_index=True)
+    return merged, additions, conflicts.reset_index(drop=True)
+
+
+def repair_raw_windows(client, windows, out_path=DEFAULT_OUT, quiet=False):
+    """Re-query selected UTC windows through ``fetch_zone`` and repair the dump.
+
+    Each window has ``zone``, ``variable``, ``start_utc`` and exclusive
+    ``end_utc`` values, plus optional ``psr_types``. The combined dump and each
+    touched per-zone part are replaced only after all temporary files are valid.
+    """
+    out_path = os.path.abspath(out_path)
+    parts_dir = os.path.splitext(out_path)[0] + ".parts"
+    included_zones = set(pd.read_parquet(out_path, columns=["zone"])["zone"]
+                           .astype("string").dropna().unique())
+    fetched_by_zone = {}
+    reports = []
+
+    for window in windows:
+        zone = window["zone"]
+        variable = window["variable"]
+        start = pd.Timestamp(window["start_utc"])
+        end = pd.Timestamp(window["end_utc"])
+        if start.tzinfo is None or end.tzinfo is None:
+            raise ValueError("repair window bounds must be timezone-aware")
+        start = start.tz_convert("UTC")
+        end = end.tz_convert("UTC")
+        if start >= end:
+            raise ValueError(f"invalid repair window {start} to {end}")
+
+        frame, manifest = fetch_zone(client, zone, start, end,
+                                     variables=[variable], quiet=quiet)
+        frame = frame[(frame["timestamp_utc"] >= start)
+                      & (frame["timestamp_utc"] < end)].copy()
+        psr_types = window.get("psr_types")
+        if psr_types is not None:
+            frame = frame[frame["psr_type"].isin(psr_types)].copy()
+        fetched_by_zone.setdefault(zone, []).append(frame)
+        reports.append({
+            "zone": zone,
+            "variable": variable,
+            "psr_types": ",".join(psr_types or []),
+            "start_utc": start,
+            "end_utc": end,
+            "rows_returned": len(frame),
+            "resolutions": ",".join(sorted(frame["resolution"].dropna().unique())),
+            "fetch_error": manifest[0]["error"],
+        })
+
+    replacements = {}
+    conflicts = []
+    additions_by_window = []
+    try:
+        for zone, frames in fetched_by_zone.items():
+            part_path = os.path.join(parts_dir, f"{zone}.parquet")
+            if not os.path.exists(part_path):
+                raise FileNotFoundError(f"missing raw-dump part: {part_path}")
+            existing = pd.read_parquet(part_path)
+            fetched = pd.concat(frames, ignore_index=True)
+            merged, additions, zone_conflicts = merge_requery(existing, fetched)
+            temp_path = f"{part_path}.repair-{uuid.uuid4().hex}.tmp.parquet"
+            _write_part(merged, temp_path)
+            replacements[part_path] = temp_path
+            conflicts.append(zone_conflicts)
+
+            added_keys = pd.MultiIndex.from_frame(additions[ROW_KEY])
+            for report, window in zip(reports, windows):
+                if window["zone"] != zone:
+                    continue
+                start = report["start_utc"]
+                end = report["end_utc"]
+                mask = ((additions["variable"] == window["variable"])
+                        & (additions["timestamp_utc"] >= start)
+                        & (additions["timestamp_utc"] < end))
+                psr_types = window.get("psr_types")
+                if psr_types is not None:
+                    mask &= additions["psr_type"].isin(psr_types)
+                additions_by_window.append((report, int(mask.sum())))
+
+        part_paths = sorted(
+            os.path.join(parts_dir, f"{zone}.parquet") for zone in included_zones)
+        missing_parts = [path for path in part_paths if not os.path.exists(path)]
+        if missing_parts:
+            raise FileNotFoundError(f"combined dump has no part(s): {missing_parts}")
+        combined_inputs = [replacements.get(path, path) for path in part_paths]
+        temp_out = f"{out_path}.repair-{uuid.uuid4().hex}.tmp.parquet"
+        total = combine_parts(combined_inputs, temp_out)
+        expected = sum(pd.read_parquet(path, columns=["value"]).shape[0]
+                       for path in combined_inputs)
+        if total != expected:
+            raise RuntimeError(f"combined {total} rows, expected {expected}")
+
+        stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
+        backups = {}
+        for path in [out_path, *replacements]:
+            backup = f"{path}.backup-{stamp}"
+            shutil.copy2(path, backup)
+            backups[path] = backup
+        for path, temp_path in replacements.items():
+            os.replace(temp_path, path)
+        os.replace(temp_out, out_path)
+    except Exception:
+        for temp_path in [*replacements.values(), locals().get("temp_out")]:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+        raise
+
+    for report, added in additions_by_window:
+        report["rows_added"] = added
+    conflict_frame = pd.concat(conflicts, ignore_index=True) if conflicts else \
+        pd.DataFrame(columns=ROW_KEY + ["existing_value", "queried_value"])
+    return pd.DataFrame(reports), conflict_frame, backups
 
 
 def main(argv=None):

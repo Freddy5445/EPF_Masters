@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from entsoe_tp.parser import parse_document  # noqa: E402
 from entsoe_tp.raw_dump import (  # noqa: E402
     COLUMNS, DEFAULT_ZONES, _queries, _shape, combine_parts,
-    variables_in_part,
+    merge_requery, variables_in_part,
 )
 
 NS = 'xmlns="urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:3"'
@@ -283,6 +283,46 @@ class TestCombineParts(unittest.TestCase):
             self.assertEqual(total, 4)
             combined = pd.read_parquet(out)
             self.assertEqual(sorted(combined["zone"].unique()), ["DK1", "SE3"])
+
+
+class TestRequeryMerge(unittest.TestCase):
+
+    def row(self, timestamp, value, resolution="PT60M"):
+        frame = parse_document(
+            price_document(timestamp, str(pd.Timestamp(timestamp) + pd.Timedelta(hours=1)),
+                           resolution, 1 if resolution == "PT60M" else 4),
+            "price.amount", expect_resolution=None)
+        return _shape(frame, "DK1", "EIC", "price", {"documentType": "A44"})
+
+    def test_existing_key_is_not_appended(self):
+        existing = self.row("2020-01-01T00:00Z", 41)
+        merged, additions, conflicts = merge_requery(existing, existing.copy())
+
+        self.assertEqual(len(merged), len(existing))
+        self.assertTrue(additions.empty)
+        self.assertTrue(conflicts.empty)
+
+    def test_new_native_resolution_rows_are_appended(self):
+        existing = self.row("2020-01-01T00:00Z", 41)
+        fetched = self.row("2025-04-09T00:00Z", 41, resolution="PT15M")
+        merged, additions, conflicts = merge_requery(existing, fetched)
+
+        self.assertEqual(len(additions), 4)
+        self.assertEqual(set(additions["resolution"]), {"PT15M"})
+        self.assertEqual(len(merged), len(existing) + 4)
+        self.assertTrue(conflicts.empty)
+
+    def test_conflicting_existing_value_is_reported_not_appended(self):
+        existing = self.row("2020-01-01T00:00Z", 41)
+        fetched = existing.copy()
+        fetched["value"] += 10
+        merged, additions, conflicts = merge_requery(existing, fetched)
+
+        self.assertEqual(len(merged), len(existing))
+        self.assertTrue(additions.empty)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts.iloc[0]["existing_value"], 41)
+        self.assertEqual(conflicts.iloc[0]["queried_value"], 51)
 
 
 if __name__ == "__main__":

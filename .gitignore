@@ -27,6 +27,7 @@ activate_venv.txt
 
 # Parquet files
 *.parquet
+*.parquet.backup-*
 
 
 
