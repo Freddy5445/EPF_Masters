@@ -1,15 +1,11 @@
 """
 Run the LEAR backtest on a zone taken from the cleaned hourly panel.
 
-``data_cleaning.ipynb`` writes ``datasets/nordic_baltic_clean_hourly.parquet``: every
-Nordic/Baltic series in one long table, already on naive local market time with 24
-rows per calendar day and no gaps -- all cleaning happens there, so every model
-reads identically prepared inputs. ``run_lear_dk1.py`` reads
-the epftoolbox layout instead -- one CSV per zone, naive local time, price first and the
-exogenous inputs after it. This script is the bridge, and nothing more: it projects one
-zone out of the panel into that CSV and then hands over to ``run_lear_dk1.main()``, so
-the argument handling, window checks, causal imputation and backtest are the same code
-paths a normal run uses.
+``data_cleaning_v2.ipynb`` writes the canonical UTC panel at
+``datasets/nordic_baltic_clean_hourly_utc.parquet``. This script passes it through
+the shared ``local_day_panel`` module, which applies the 24-hour local delivery-day
+DST convention identically for every LEAR and DNN configuration. It then projects
+one zone into the epftoolbox CSV layout and hands over to ``run_lear_dk1.main()``.
 
 Smoke-test the pipeline on ten days:
 
@@ -30,12 +26,13 @@ import sys
 import pandas as pd
 
 import run_lear_dk1
-from entsoe_tp.areas import lookup
 from entsoe_tp.hourly import assert_epftoolbox_grid
 from lear_dk1.compat import minimum_calibration_window
+from local_day_panel import MARKET_TIMEZONE, build_local_day_matrices, flatten_local_day_matrix
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_PANEL = os.path.join(THIS_DIR, "datasets", "nordic_baltic_clean_hourly.parquet")
+DEFAULT_PANEL = os.path.join(
+    THIS_DIR, "datasets", "nordic_baltic_clean_hourly_utc.parquet")
 
 # Column layouts, mirroring entsoe_tp.build_dataset._column_specs. Each entry is
 # (column name, variable, psr_types) -- psr_types None meaning "this variable has none".
@@ -72,7 +69,7 @@ def dataset_name_for(zone, layout):
     return f"{zone}_clean_{layout}"
 
 
-def series_for(panel, zone, variable, psr_types):
+def series_for(panel, matrices, zone, variable, psr_types):
     """One local-time series for a column spec, summing the production types it names.
 
     Summing is done across columns rather than by grouping rows so that a missing
@@ -91,32 +88,27 @@ def series_for(panel, zone, variable, psr_types):
     if rows.empty:
         return None, psr_types or [variable]
 
-    wide = rows.pivot_table(index="timestamp_local", columns="psr_type", values="value")
-    total = wide.sum(axis=1, min_count=wide.shape[1])
+    components = {
+        series: flatten_local_day_matrix(matrices[str(series)])
+        for series in rows.series.unique()
+    }
+    wide = pd.DataFrame(components)
+    total = wide.sum(axis=1, min_count=len(components))
     return total.sort_index(), missing
 
 
 def build_csv(panel_path, zone, layout, out_dir, dataset_name, quiet=False):
     """Project one zone out of the cleaned panel into the epftoolbox CSV layout.
 
-    This is a projection and nothing more. All cleaning -- the local grid, the
-    epftoolbox DST convention and the causal imputation -- happens once in
-    data_cleaning.ipynb, so every model reads identically prepared inputs. The
-    panel arrives already on naive local time with 24 rows per day and no gaps;
-    this only selects a zone, sums the production types each column names, and
-    orders the columns the way read_data binds them.
+    The canonical panel remains in UTC. Shared local-day construction applies the
+    epftoolbox DST convention once here for every LEAR and DNN layout; this function
+    then selects a zone, sums the production types each column names, and orders
+    the columns the way read_data binds them.
 
     Returns the local date span written, so the caller can default the test range
     to what actually exists.
     """
     panel = pd.read_parquet(panel_path)
-
-    if "timestamp_local" not in panel.columns:
-        raise ValueError(
-            f"{panel_path} has no timestamp_local column. It looks like the raw "
-            f"UTC panel rather than the cleaned one -- re-run section 7 of "
-            f"data_cleaning.ipynb, which builds the model-ready panel."
-        )
 
     for column in ("zone", "variable", "psr_type"):
         panel[column] = panel[column].astype("object").fillna("").astype(str)
@@ -125,12 +117,12 @@ def build_csv(panel_path, zone, layout, out_dir, dataset_name, quiet=False):
     if zone not in zones:
         raise ValueError(f"{zone} is not in the panel. It holds: {', '.join(zones)}")
 
-    tz = lookup(zone).tz
+    matrices, dst_report = build_local_day_matrices(panel)
     specs = LAYOUTS[layout]
 
     columns, absent = {}, []
     for name, variable, psr_types in specs:
-        series, missing = series_for(panel, zone, variable, psr_types)
+        series, missing = series_for(panel, matrices, zone, variable, psr_types)
         if series is None:
             absent.append((name, variable, psr_types))
             continue
@@ -158,7 +150,7 @@ def build_csv(panel_path, zone, layout, out_dir, dataset_name, quiet=False):
 
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{dataset_name}.csv")
-    frame.index.name = f"Date ({tz} local time, naive, ISO 8601)"
+    frame.index.name = f"Date ({MARKET_TIMEZONE} local time, naive, ISO 8601)"
     frame.to_csv(path, date_format="%Y-%m-%dT%H:%M:%S")
 
     start_date = frame.index.min().normalize()
@@ -167,6 +159,9 @@ def build_csv(panel_path, zone, layout, out_dir, dataset_name, quiet=False):
     if not quiet:
         print(f"{zone}: {len(frame):,} hours, {start_date.date()} to {end_date.date()} "
               f"({len(frame) // 24:,} days), {len(frame.columns)} columns")
+        print(f"DST normalized: {len(dst_report.spring_days)} spring and "
+              f"{len(dst_report.autumn_days)} autumn transition days across "
+              f"{dst_report.series_count} series")
         print(f"written: {path}\n")
 
     return path, start_date, end_date

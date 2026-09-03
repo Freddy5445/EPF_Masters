@@ -14,20 +14,26 @@ price, day-ahead load forecast, and day-ahead solar and wind generation
 forecasts. Reservoir data are excluded because they are weekly stock levels,
 not hourly flows.
 
-The cleaned sample runs from **2019-01-01 00:00 UTC** through
-**2025-09-30 21:00 UTC**. The end is chosen because the next hour marks the
-transition to genuinely quarter-hourly day-ahead prices in most retained zones.
-Stopping there keeps the target price at hourly market resolution.
+The sample bounds are defined as local delivery hours in `Europe/Copenhagen`:
+**2019-01-01 00:00** through **2025-09-30 23:00**. They become
+**2018-12-31 23:00 UTC** through **2025-09-30 21:00 UTC** for the parquet scan.
+The end is chosen because the next local hour marks the transition to genuinely
+quarter-hourly day-ahead prices in most retained zones.
 
-All cleaning remains in UTC. Consequently, daylight-saving transitions do not
-create missing or duplicated clock hours in this dataset.
+Cleaning and canonical storage remain in UTC, which preserves both physical
+hours during the autumn clock change and avoids ambiguous timestamps. This does
+not eliminate DST handling; it defers it to the shared
+[`local_day_panel.py`](../local_day_panel.py) module, which converts UTC series
+to local delivery days and applies the 24-hour EPF convention before any model
+CSV is built.
 
 ## Pipeline overview
 
 ```text
 nordic_baltic_raw.parquet
     |
-    |  select zones, variables and end time
+    |  select zones, variables and local-derived UTC bounds
+    |  retain only the DE-LU PT60M price product
     |  remove duplicate source rows
     |  aggregate PT15M observations to UTC hours
     |  prefer PT60M where both resolutions exist
@@ -41,14 +47,31 @@ nordic_baltic_clean_hourly_utc.parquet
 
 ### 1. Filter the raw extract
 
-The parquet scan applies zone, variable and time predicates before materializing
-the data. It includes all sub-hourly slots belonging to the final retained hour.
+The parquet scan applies zone, variable and converted time predicates before
+materializing the data. It includes all sub-hourly slots belonging to the final
+retained hour.
 Categorical nulls are normalized to empty strings, and ENTSO-E production codes
 are mapped to `solar`, `wind_offshore` and `wind_onshore`.
 
 The notebook asserts that every requested zone is present, excluded variables
-are absent, no timestamp exceeds the bound, and no retained price hour must be
-constructed from differing quarter-hour prices without an hourly alternative.
+are absent, timestamps stay inside the bounds, and no retained price hour must
+be constructed from differing quarter-hour prices without an hourly alternative.
+
+#### DE-LU dual day-ahead price products
+
+DE-LU publishes two complete parallel price series under the same EIC. `PT60M`
+is the hourly day-ahead auction used by this study. `PT15M` is the separate
+quarter-hourly auction, not a finer sampling of the same cleared product.
+
+The distinction is empirical as well as semantic. Across 61,368 overlapping
+hours, the four quarter-hour prices vary within 61,364 hours. Their hourly mean
+has a zero-lag correlation of 0.986 with the hourly auction but a mean absolute
+difference of EUR 8.28/MWh. The two series are related, but not interchangeable.
+
+The pipeline therefore filters DE-LU price to `PT60M` explicitly during loading
+and asserts after hourly construction that no retained DE-LU price row has
+`source_resolution == "PT15M"`. This prevents a silent product switch when the
+hourly auction series ends while the quarter-hourly series continues.
 
 ### 2. Remove duplicate rows
 
@@ -71,17 +94,18 @@ for MW forecasts. The sample boundary ensures that quarter-hour prices used in
 the panel represent repeated hourly prices rather than distinct quarter-hour
 products.
 
-Aggregation is performed separately by source resolution. If an hour contains
-both PT60M and PT15M data, PT60M takes precedence; the PT15M mean is used only
-when no PT60M observation exists. Partial hours are counted and reported.
+Aggregation is performed separately by source resolution. For non-price series,
+if an hour contains both PT60M and PT15M data, PT60M takes precedence and the
+PT15M mean is used only when no PT60M observation exists. DE-LU price has already
+been restricted to its PT60M product. Partial hours are counted and reported.
 After this step, each series has at most one row per UTC hour.
 
 ### 4. Align the sample and remove unsuitable series
 
-The initial common start is 2018-10-01, when DE-LU load is available. Series
+The local modeling start is 2019-01-01 00:00, or 2018-12-31 23:00 UTC. Series
 beginning later than this point are removed rather than represented by years of
-leading missing values; this removes SE3 and SE4 solar. The final modeling start
-is then set to 2019-01-01.
+leading missing values; this removes SE3 and SE4 solar. Including the preceding
+UTC hour makes the first local delivery day complete.
 
 NO2 offshore wind is removed because it is unsuitable for the retained panel.
 After imputation, variance diagnostics identify NO2 solar as constant at zero,
@@ -130,6 +154,10 @@ the longest gap is only 48 hours.
 
 The method does not search farther back when the previous-week value is absent.
 Instead, it raises an error, making unsupported imputation visible.
+
+The lag is 168 physical UTC hours, which can differ from the same local clock
+hour across a DST transition. In the rebuilt dataset, none of the 798 retained
+weekly fills crosses such a local-hour mismatch.
 
 ### Wind: causal cross-zone ordinary least squares
 
@@ -215,9 +243,31 @@ Before export, the notebook asserts that:
 - every retained series is gapless between its first and last hour.
 
 The output is `datasets/nordic_baltic_clean_hourly_utc.parquet`. In the documented
-run it contains **1,715,582 rows, 20 columns and 29 series**. The data remain in
+run it contains **1,715,611 rows, 20 columns and 29 series**. The data remain in
 long format and retain source metadata, source resolution, slot counts and the
 imputation audit fields.
+
+## Shared local-day panel
+
+[`local_day_panel.py`](../local_day_panel.py) is the single UTC-to-local
+conversion used by `run_lear_from_clean.py`, which builds the CSV inputs shared
+by LEAR and all DNN configurations. It converts timestamps to
+`Europe/Copenhagen`, derives local date and hour, and returns one
+local-date-by-local-hour matrix per series.
+
+The module applies the standard 24-hour EPF convention identically to prices and
+all exogenous series:
+
+- on spring transitions, nonexistent 02:00 is inserted as the mean of 01:00 and
+    03:00;
+- on autumn transitions, the two physical observations labelled 02:00 are
+    averaged into one local-hour value.
+
+It rejects any missing or repeated local hour not explained by those transitions
+and asserts that every matrix has columns 00:00 through 23:00 with complete first
+and last days. The current sample yields 2,465 complete local days for every one
+of the 29 series. The assertions cover seven spring dates and six autumn dates,
+all 13 transitions in the sample.
 
 ## Methodological limitations
 
