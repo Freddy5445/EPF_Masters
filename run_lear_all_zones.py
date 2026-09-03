@@ -81,7 +81,8 @@ import run_lear_dk1  # noqa: E402
 import run_lear_from_clean  # noqa: E402
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_PANEL = os.path.join(THIS_DIR, "datasets", "nordic_baltic_clean_hourly.parquet")
+DEFAULT_PANEL = os.path.join(
+    THIS_DIR, "datasets", "nordic_baltic_clean_hourly_local.parquet")
 
 # The paper's specification: two exogenous series, 247 regressors.
 BASE_LAYOUT = "load-windsolar"
@@ -269,7 +270,7 @@ def main(argv=None):
 
     if not os.path.exists(args.panel):
         print(f"error: no cleaned panel at {args.panel}", file=sys.stderr)
-        print("Run data_cleaning.ipynb to build it.", file=sys.stderr)
+        print("Run data_cleaning_v2.ipynb to build it.", file=sys.stderr)
         return 1
 
     available, with_hydro = panel_zones(args.panel)

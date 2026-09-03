@@ -10,6 +10,7 @@ from local_day_panel import (
     LocalDayPanelError,
     build_local_day_matrices,
     flatten_local_day_matrix,
+    normalize_local_hourly_panel,
 )
 
 
@@ -65,10 +66,34 @@ class TestLocalDayPanel(unittest.TestCase):
                         .eq(pd.Timedelta(hours=1)).all())
         self.assertEqual(len(flattened), len(matrix) * 24)
 
+    def test_normalized_long_panel_records_dst_adjustments(self):
+        local, report = normalize_local_hourly_panel(self._panel())
+
+        self.assertNotIn("timestamp_utc", local.columns)
+        self.assertIsNone(local["timestamp_local"].dt.tz)
+        self.assertEqual((local["dst_adjustment"] == "spring_interpolation").sum(), 1)
+        self.assertEqual(report.spring_days, (pd.Timestamp("2024-03-31"),))
+
+    def test_autumn_average_preserves_either_source_imputation(self):
+        panel = self._panel("2024-10-25 22:00", "2024-10-27 22:00")
+        panel["imputed"] = False
+        panel["imputation_method"] = "observed"
+        panel["imputation_predictors"] = ""
+        local_time = panel.timestamp_utc.dt.tz_convert("Europe/Copenhagen")
+        repeated = (local_time.dt.tz_localize(None) == pd.Timestamp("2024-10-27 02:00"))
+        second = panel.index[repeated][-1]
+        panel.loc[second, ["imputed", "imputation_method"]] = [True, "causal_cross_zone_ols"]
+
+        local, _ = normalize_local_hourly_panel(panel)
+        row = local.loc[local.timestamp_local == pd.Timestamp("2024-10-27 02:00")].iloc[0]
+
+        self.assertTrue(row.imputed)
+        self.assertEqual(row.imputation_method, "causal_cross_zone_ols")
+        self.assertEqual(row.dst_adjustment, "autumn_average")
+
     def test_full_dataset_has_all_transition_days_and_complete_edges(self):
-        path = Path(__file__).parents[1] / "datasets" / "nordic_baltic_clean_hourly_utc.parquet"
+        path = Path(__file__).parents[1] / "datasets" / "nordic_baltic_clean_hourly_local.parquet"
         panel = pd.read_parquet(path)
-        matrices, report = build_local_day_matrices(panel)
 
         expected_spring = tuple(pd.to_datetime([
             "2019-03-31", "2020-03-29", "2021-03-28", "2022-03-27",
@@ -79,12 +104,21 @@ class TestLocalDayPanel(unittest.TestCase):
             "2023-10-29", "2024-10-27",
         ]))
 
-        self.assertEqual(report.spring_days, expected_spring)
-        self.assertEqual(report.autumn_days, expected_autumn)
-        self.assertEqual(report.series_count, 29)
-        for matrix in matrices.values():
-            self.assertEqual(matrix.shape, (2465, 24))
-            self.assertTrue(matrix.iloc[[0, -1]].notna().all(axis=None))
+        spring = tuple(pd.DatetimeIndex(panel.loc[
+            panel.dst_adjustment == "spring_interpolation", "timestamp_local"
+        ].dt.normalize().unique()).sort_values())
+        autumn = tuple(pd.DatetimeIndex(panel.loc[
+            panel.dst_adjustment == "autumn_average", "timestamp_local"
+        ].dt.normalize().unique()).sort_values())
+        per_day = panel.groupby(
+            ["series", panel.timestamp_local.dt.normalize()], observed=True
+        ).size()
+
+        self.assertEqual(spring, expected_spring)
+        self.assertEqual(autumn, expected_autumn)
+        self.assertEqual(panel.series.nunique(), 29)
+        self.assertTrue(per_day.eq(24).all())
+        self.assertFalse(panel.duplicated(["series", "timestamp_local"]).any())
 
 
 if __name__ == "__main__":

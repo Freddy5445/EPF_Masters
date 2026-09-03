@@ -1,7 +1,7 @@
 # Data cleaning
 
 Everything that happens to the data between the ENTSO-E API and a model lives in
-**`data_cleaning.ipynb`**. Nothing downstream cleans anything: `run_lear_dk1.py`
+**`data_cleaning_v2.ipynb`**. Nothing downstream cleans anything: `run_lear_dk1.py`
 and `run_dnn_dk1.py` refuse to run on a dataset with gaps and say to re-run the
 notebook.
 
@@ -20,10 +20,10 @@ ENTSO-E API
    │  entsoe_tp/            acquisition only — nothing invented
    ▼
 nordic_baltic_raw.parquet   long, UTC, mixed resolutions, duplicates, gaps
-   │  data_cleaning.ipynb   sections 1–6: structural cleaning (UTC)
+   │  data_cleaning_v2.ipynb   structural cleaning (UTC)
    │                        section 7:    the model-ready panel (local time)
    ▼
-nordic_baltic_clean_hourly.parquet
+nordic_baltic_clean_hourly_local.parquet
    │  run_lear_from_clean.py   projection only — select, sum, order
    ▼
 <ZONE>_clean_<layout>.csv   what epftoolbox reads
@@ -195,7 +195,7 @@ forecast.
 
 ## Output
 
-`datasets/nordic_baltic_clean_hourly.parquet`, long format:
+`datasets/nordic_baltic_clean_hourly_local.parquet`, long format:
 
 | Column | Meaning |
 |---|---|

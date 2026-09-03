@@ -1,180 +1,231 @@
 # Treatment of missing values
 
-Draft material for the methodology chapter. Figures marked `[X]` must be filled
-from the run manifest (`experiments/<run>/run_metadata.json`, key `imputation`)
-once the dataset has been built — they are not yet measured on the real DK1
-series.
+This document describes the missing-data treatment currently implemented in
+[`data_cleaning_v2.ipynb`](../data_cleaning_v2.ipynb). It complements the full
+pipeline description in [`data-cleaning-v2.md`](data-cleaning-v2.md).
 
----
+The central distinction is between two different phenomena:
 
-## 1. Origin and extent of missingness
+- **Publication gaps** are absent physical UTC observations in the ENTSO-E data
+  and are handled in the cleaning notebook.
+- **DST clock irregularities** arise when complete UTC data are mapped to local
+  delivery days and are normalized at the end of the cleaning notebook by
+  [`local_day_panel.py`](../local_day_panel.py).
 
-The dataset is assembled from three ENTSO-E Transparency Platform data items for
-bidding zone DK1: day-ahead prices (12.1.D, `documentType=A44`), the day-ahead
-total load forecast (6.1.B, `A65`), and the day-ahead wind and solar generation
-forecast (14.1.D, `A69`), the latter split by production type into wind
-(on- and offshore, `psrType` B18 and B19) and solar (B16). All three are
-*ex ante* forecasts published before gate closure, and are therefore genuinely
-available to a forecaster at the time a day-ahead price forecast must be made.
+They are not treated as the same kind of missingness.
 
-Hourly observations are absent for several distinct reasons, which are worth
-separating because they justify different treatment:
+## 1. Dataset and observed missingness
 
-1. **Platform coverage ramp-up.** The Transparency Platform became operational
-   on 5 January 2015, and publication was not immediately complete for every
-   data item. Coverage in the first days of the sample is sparse.
-2. **Publication outages and late submissions.** Isolated hours or short runs
-   are absent where a TSO submission failed or arrived late.
-3. **Production types not yet reported.** A zone may begin publishing a
-   generation forecast for a given production type later than others.
-4. **Daylight saving time.** On the spring transition the local hour 02:00 does
-   not exist, so no observation can exist for it.
+The retained sample covers DK1, DK2, NL, DE-LU, NO2, SE3 and SE4. It contains
+day-ahead prices, day-ahead load forecasts, and day-ahead solar and onshore or
+offshore wind generation forecasts. The local delivery window is
+2019-01-01 00:00 through 2025-09-30 23:00 in `Europe/Copenhagen`. Cleaning uses
+the corresponding 2018-12-31 23:00 through 2025-09-30 21:00 UTC physical window
+before exporting normalized local timestamps.
 
-Across the sample period ([start] to [end], [N] hourly observations), missing
-values account for [X]% of the price series, [X]% of the load forecast, [X]% of
-the wind forecast and [X]% of the solar forecast.
+After hourly aggregation, the common-window filter and removal of NO2 offshore
+wind, the notebook finds **91 gap runs containing 2,190 missing UTC hours** in
+16 series. The longest runs contain 48 hours. All publication gaps are in
+exogenous forecasts; the retained price series contain no gaps.
 
-## 2. Design principle: acquisition is separated from treatment
+Missingness is diagnosed before filling through:
 
-The download step stores exactly what the platform published and records every
-unpublished hour as missing. No value is filled, smoothed or extrapolated at
-this stage. Imputation is applied later, when the dataset is loaded for
-modelling.
+1. Observed versus expected hours for every series.
+2. Every contiguous gap's start, end and duration.
+3. Monthly coverage.
+4. A daily availability raster with the period from 2023-10-01 highlighted.
 
-This separation is deliberate. If gaps were filled during download, the stored
-dataset would silently contain synthetic values indistinguishable from observed
-ones, the choice of method would be unrecoverable from the data, and any
-sensitivity analysis would require re-downloading. Keeping the raw series
-immutable means the imputation scheme is a stated modelling assumption that can
-be varied and reported, rather than an invisible property of the input.
+An absent publication is represented in long form by a missing series-hour row,
+not by a row whose `value` is null. The notebook detects it by comparing observed
+timestamps with a complete hourly UTC grid.
 
-## 3. Requirement: imputation must be causal
+## 2. Separation of acquisition, cleaning and model panels
 
-The evaluation design is a walk-forward backtest with daily recalibration: to
-forecast day *D*, the model is re-estimated on a trailing calibration window
-using only information available before *D*. The credibility of the resulting
-error metrics rests entirely on that information set being respected.
+The raw parquet preserves what ENTSO-E published. It is not imputed during
+download. The cleaning notebook aggregates resolution, diagnoses gaps, inserts
+synthetic rows under explicit rules, normalizes local delivery days, and writes
+`datasets/nordic_baltic_clean_hourly_local.parquet`.
 
-An imputed value therefore cannot be permitted to depend on observations later
-than the hour it fills. Formally, the value assigned to a missing observation at
-time *t* must be a function only of observations at times strictly less than *t*.
-Violating this introduces look-ahead bias through two distinct channels:
+The cleaned parquet uses naive local market timestamps and carries separate audit
+fields for publication-gap imputation and DST adjustment. Downstream model scripts
+perform neither missing-value imputation nor DST normalization; they project the
+already-complete local panel into the CSV layouts consumed by LEAR and the DNNs.
 
-- **Training contamination.** A model calibrated on a window containing values
-  derived from future observations has been given information a real forecaster
-  would not have had, biasing measured accuracy optimistically.
-- **Target contamination.** Where a gap falls in the *price* series inside the
-  test period, the model is scored against a value that itself encodes future
-  information — corrupting the error metric directly rather than merely the
-  model.
+This separation keeps the raw data recoverable, gives every model the same
+filled inputs, and prevents model-specific copies of the imputation rules from
+drifting apart.
 
-This requirement rules out several methods that are otherwise conventional for
-time-series gap filling. **Linear interpolation is bidirectional by
-construction**: it fills a gap by drawing a line between the last observation
-before it and the first after it, so it cannot be made causal. **Global summary
-statistics** — a series mean, a per-hour mean or median computed over the whole
-sample — are contaminated for the same reason, since the statistic is computed
-partly from observations later than the gap it fills. Both are common defaults,
-and both were rejected here.
+## 3. Information-set requirement
 
-The practical magnitude of the distortion is easily demonstrated. On a synthetic
-hourly series whose level steps from 50 to 500 exactly at the point a gap ends,
-a causal scheme fills the gap with values reaching at most 75 — consistent with
-the pre-gap level and the diurnal amplitude — whereas linear interpolation
-returns values up to 473 and a "same hour, following week" rule up to 525. Both
-non-causal methods have reproduced a level shift that had not yet occurred.
+Publication-gap treatment is designed to avoid future target information. For a
+missing observation at UTC hour $t$, the weekly method reads $t-168$ hours. A
+wind model fitted for a gap beginning at $g$ is trained only on complete rows
+whose timestamps satisfy $t<g$.
 
-## 4. Imputation hierarchy
+Wind prediction does use contemporaneous forecasts from neighboring zones during
+the target gap. These are day-ahead exogenous forecasts for the same delivery
+hours, not later observations of the missing target series. The historical
+coefficient fit, predictor centering and predictor scaling remain strictly
+pre-gap.
 
-Missing values are filled by the first applicable rule in the following order.
-Each rule uses only observations preceding the hour being filled.
+No bidirectional interpolation, future-week substitution, whole-sample mean or
+whole-sample median is used to repair ENTSO-E publication gaps.
 
-| Rule | Applies to | Justification |
-|---|---|---|
-| Carry the last observation forward | Runs of at most 3 hours | Adjacent hourly observations are strongly correlated, so over a short interval persistence is close to harmless. Unlike interpolation it requires nothing from the far side of the gap. |
-| Same hour, an earlier week (−7, −14, … days, up to 8 weeks) | Longer runs | Preserves both the diurnal profile and the weekday/weekend distinction, which are pronounced in prices, load and solar generation alike. |
-| Same hour, an earlier day (−1 … −6 days) | Hours for which no earlier week is available | Relevant only in the first weeks of the sample. |
-| Expanding median for that hour of day, over past observations only | Anything still missing | Last resort; the expanding window ensures the statistic is computed from past data alone. |
-| No fill; observation dropped | Hours with no prior observation at all | See §5. |
+## 4. Variable-specific filling rules
 
-The ordering reflects a preference for the most local information that remains
-informative. Persistence is appropriate over a few hours but degrades quickly:
-carried across a multi-day gap it would flatten the diurnal cycle entirely,
-which is why the weekly rule takes over beyond the three-hour threshold. The
-threshold itself is a parameter (`--max-linear`) and is a natural candidate for
-sensitivity analysis.
+There is no generic hierarchy and no silent fallback. The rule is selected from
+the physical variable, and the notebook raises an error when its requirements
+are not met.
 
-## 5. Boundary handling
+### 4.1 Solar and load
 
-Observations at the very beginning of the sample have no prior data to draw on
-and therefore cannot be imputed causally by any rule. Rather than fall back on a
-non-causal estimate, these hours are left missing and the sample is truncated
-forward to the first midnight from which all series are complete. Truncating to
-a midnight boundary preserves the requirement of exactly 24 observations per
-calendar day, which the LEAR feature construction assumes.
+Every missing solar or load forecast at hour $t$ is replaced by the same series
+exactly one physical week earlier:
 
-For this reason the sample begins on 7 January 2015 rather than 5 January, the
-platform's first day of operation. [Adjust if the run reports further trimming.]
+$$
+\hat{y}_t = y_{t-168\text{ h}}.
+$$
 
-## 6. Daylight saving time
+This preserves hour-of-day and weekday structure in UTC while using only prior
+data. Missing timestamps are processed from oldest to newest, so a filled value
+could support another fill more than one week later. The current gaps are at most
+48 hours, so this cascading case does not arise.
 
-The index is naive local market time with exactly 24 rows per calendar day,
-matching the convention of the reference datasets distributed with `epftoolbox`.
-The two DST transitions are handled distinctly:
+The method does not search two or more weeks backward if $t-168$ hours is absent.
+It fails explicitly instead. Because a fixed 168-hour UTC lag can cross a DST
+offset change, the rebuilt dataset was checked separately: **0 of the 798
+retained weekly fills change local clock hour relative to their source**.
 
-- **Autumn transition (25-hour day).** Two observations map to the single 02:00
-  slot. They are averaged. This is an aggregation of two genuine observations,
-  not an imputation, and cannot be avoided while maintaining a fixed 24-row day.
-- **Spring transition (23-hour day).** Local 02:00 does not exist, so the slot
-  is necessarily empty. It is treated as an ordinary one-hour gap and filled by
-  the causal rules above.
+### 4.2 Wind
 
-## 7. Reporting
+Every contiguous wind gap is filled by a separate cross-zone ordinary least
+squares model. Onshore wind uses only onshore forecasts from other zones;
+offshore wind uses only offshore forecasts.
 
-Each backtest run records, per series, the number of values filled by each rule
-and the number left unfilled, in `run_metadata.json`. This makes the exact
-extent and composition of imputation recoverable for any reported result rather
-than being a matter of assertion.
+For a target zone and a gap beginning at $g$:
 
-## 8. Limitations
+1. Candidate predictors are non-target zones whose same-type wind forecast is
+   present for every hour of the gap.
+2. Training rows require the target and every selected predictor to be observed.
+3. Every training timestamp must be strictly earlier than $g$.
+4. At least 672 complete historical hours, or 28 days, are required.
 
-Several caveats should be stated explicitly rather than left implicit.
+For the selected pre-gap training set $\mathcal{T}_g$,
 
-**Missingness may not be at random.** All rules assume the missing observation
-resembles nearby or seasonally analogous observed ones. If publication failures
-correlate with market conditions — for instance if outages cluster around
-extreme events or system stress — imputed values will be systematically
-unrepresentative, and in a direction that understates volatility. The extent of
-this cannot be assessed from the data itself.
+$$
+\mathcal{T}_g = \{t : t < g,\ y_t\text{ and all }x_t\text{ are observed}\}.
+$$
 
-**The weekly rule assumes short-run seasonal stability.** Substituting the same
-hour from an earlier week is reasonable under stable conditions but degrades
-around public holidays and during regime shifts. The 2022 energy price episode
-is the obvious case in this sample: week-on-week price levels moved sharply,
-so a gap filled from the preceding week may be materially mis-levelled. Gaps
-falling in that period deserve individual scrutiny.
+Predictors are standardized using only their means and standard deviations in
+$\mathcal{T}_g$. A constant predictor receives scale one. An intercept is added
+and coefficients are estimated by least squares:
 
-**Persistence understates short-run variability.** Carrying an observation
-forward across up to three hours produces a locally flat segment, marginally
-reducing measured volatility.
+$$
+\hat{\beta}_g = \arg\min_{\beta}\lVert y-X\beta\rVert_2^2.
+$$
 
-**Imputed values enter both training and evaluation.** Where an imputed hour
-falls in the test period's price series, the model is scored against a partly
-synthetic target. If this affects a non-negligible share of test hours,
-forecast accuracy should additionally be reported over the subset of test days
-whose prices are fully observed, and the two figures compared. This is the
-single most important robustness check for the scheme described here.
+The fitted model is applied to contemporaneous neighbor-zone forecasts over the
+gap. Negative predictions are clipped to zero:
 
-**Single imputation.** Each missing value is replaced by one point estimate, so
-the additional uncertainty introduced by imputation is not propagated into the
-reported error metrics. A multiple-imputation treatment would quantify it, at
-substantial computational cost given daily recalibration; it was not attempted.
+$$
+\hat{y}_t = \max(0, x_t^\top\hat{\beta}_g).
+$$
 
-## 9. Suggested robustness checks
+There is no fallback to persistence or a weekly lag if no neighbor is complete
+or the historical sample is too short; the pipeline stops with an error.
 
-1. Report MAE and rMAE both over all test days and over the subset with fully
-   observed prices.
-2. Vary the persistence threshold (`--max-linear`, e.g. 0, 3, 6 hours) and
-   confirm that reported accuracy is insensitive to it.
-3. Report the share of imputed observations separately for the training and test
-   portions of the sample, since their consequences differ.
+### 4.3 Prices and unsupported variables
+
+The retained price series have no publication gaps and **no price value is
+imputed**. If a price or any unsupported variable were missing, the notebook
+would raise an error rather than apply an exogenous-forecast rule to the target.
+
+## 5. Measured imputation totals
+
+Before constant-series removal, all 2,190 gaps are filled:
+
+| Method | Variable | Hours |
+|---|---|---:|
+| Causal cross-zone OLS | Wind | 1,342 |
+| Same hour previous week | Solar | 798 |
+| Same hour previous week | Load | 50 |
+| **Total before series removal** | | **2,190** |
+
+NO2 solar is then removed because the entire series is constant at zero. This
+removes 50 weekly-filled rows together with the rest of that series. The exported
+parquet therefore contains:
+
+| Retained category | Imputed hours |
+|---|---:|
+| Wind offshore | 456 |
+| Wind onshore | 886 |
+| Solar | 748 |
+| Load | 50 |
+| Price | 0 |
+| **Total** | **2,140** |
+
+The 2,140 retained synthetic rows are **0.1247%** of the final 1,715,611-row
+dataset.
+
+## 6. Audit trail and validation
+
+The canonical cleaned parquet records treatment row by row:
+
+| Column | Meaning |
+|---|---|
+| `imputed` | `True` only for a row inserted by publication-gap treatment |
+| `imputation_method` | `observed`, `same_hour_previous_week`, or `causal_cross_zone_ols` |
+| `imputation_predictors` | Comma-separated wind predictor zones; empty otherwise |
+
+Before export, the notebook asserts that no `(series, timestamp_utc)` pair is
+duplicated, no `value` is null, and no hourly UTC gap remains. These checks apply
+after filling and after the constant NO2 solar series is removed.
+
+Imputation metadata belongs to the dataset, not to an individual backtest run.
+LEAR and all DNN configurations read projections derived from this same cleaned
+parquet.
+
+## 7. DST normalization during cleaning
+
+The UTC panel is first completed over physical time, but local market days contain
+23 or 25 physical hours at DST transitions. Before writing the cleaned parquet,
+`local_day_panel.py` converts every series to `Europe/Copenhagen` and applies the
+standard 24-hour EPF convention:
+
+- On each spring transition, nonexistent local 02:00 is inserted as the mean of
+  local 01:00 and 03:00.
+- On each autumn transition, the two physical observations labelled local 02:00
+  are averaged into one value.
+
+The spring rule reads the following delivery hour and is therefore not a causal
+publication-gap imputation. It is a deliberate calendar normalization applied
+after the physical UTC panel is complete, identically to prices and every exogenous
+series. Autumn handling aggregates two observed values and does not
+invent a missing publication.
+
+The module rejects any other missing or repeated local hour. For the current
+sample, all 29 series pass assertions for seven spring and six autumn transition
+days. Each series becomes 2,465 complete local days, or 59,160 model rows, with
+complete first and last days.
+
+## 8. Limitations and robustness checks
+
+**Weekly stability.** Solar and load substitution assumes the previous week's
+same hour is representative. Holidays, rapid seasonal changes and structural
+shifts can weaken that assumption.
+
+**Stable spatial relationship.** Wind OLS assumes cross-zone relationships are
+approximately linear and stable over the historical sample. Predictor sets can
+differ by gap according to availability.
+
+**Single imputation.** Every gap receives one point estimate. The additional
+uncertainty is not propagated into model prediction intervals or error metrics.
+
+**Possible informative missingness.** If publication outages coincide with
+unusual system conditions, filled values may underrepresent extremes.
+
+Useful robustness checks are to exclude model days whose inputs include an
+imputed value, compare alternative minimum-history requirements for wind OLS,
+and report results with the DST-normalized transition days excluded. Price-only
+target filtering is unnecessary for the current sample because no price target
+was imputed.

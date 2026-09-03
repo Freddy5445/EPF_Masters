@@ -1,11 +1,9 @@
 """
 Run the LEAR backtest on a zone taken from the cleaned hourly panel.
 
-``data_cleaning_v2.ipynb`` writes the canonical UTC panel at
-``datasets/nordic_baltic_clean_hourly_utc.parquet``. This script passes it through
-the shared ``local_day_panel`` module, which applies the 24-hour local delivery-day
-DST convention identically for every LEAR and DNN configuration. It then projects
-one zone into the epftoolbox CSV layout and hands over to ``run_lear_dk1.main()``.
+``data_cleaning_v2.ipynb`` writes the complete 24-hour local delivery-time panel at
+``datasets/nordic_baltic_clean_hourly_local.parquet``. This script projects one zone
+into the epftoolbox CSV layout and hands over to ``run_lear_dk1.main()``.
 
 Smoke-test the pipeline on ten days:
 
@@ -28,11 +26,11 @@ import pandas as pd
 import run_lear_dk1
 from entsoe_tp.hourly import assert_epftoolbox_grid
 from lear_dk1.compat import minimum_calibration_window
-from local_day_panel import MARKET_TIMEZONE, build_local_day_matrices, flatten_local_day_matrix
+from local_day_panel import MARKET_TIMEZONE
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PANEL = os.path.join(
-    THIS_DIR, "datasets", "nordic_baltic_clean_hourly_utc.parquet")
+    THIS_DIR, "datasets", "nordic_baltic_clean_hourly_local.parquet")
 
 # Column layouts, mirroring entsoe_tp.build_dataset._column_specs. Each entry is
 # (column name, variable, psr_types) -- psr_types None meaning "this variable has none".
@@ -69,7 +67,7 @@ def dataset_name_for(zone, layout):
     return f"{zone}_clean_{layout}"
 
 
-def series_for(panel, matrices, zone, variable, psr_types):
+def series_for(panel, zone, variable, psr_types):
     """One local-time series for a column spec, summing the production types it names.
 
     Summing is done across columns rather than by grouping rows so that a missing
@@ -88,27 +86,32 @@ def series_for(panel, matrices, zone, variable, psr_types):
     if rows.empty:
         return None, psr_types or [variable]
 
-    components = {
-        series: flatten_local_day_matrix(matrices[str(series)])
-        for series in rows.series.unique()
-    }
-    wide = pd.DataFrame(components)
-    total = wide.sum(axis=1, min_count=len(components))
+    wide = rows.pivot(index="timestamp_local", columns="series", values="value")
+    total = wide.sum(axis=1, min_count=len(wide.columns))
     return total.sort_index(), missing
 
 
 def build_csv(panel_path, zone, layout, out_dir, dataset_name, quiet=False):
     """Project one zone out of the cleaned panel into the epftoolbox CSV layout.
 
-    The canonical panel remains in UTC. Shared local-day construction applies the
-    epftoolbox DST convention once here for every LEAR and DNN layout; this function
-    then selects a zone, sums the production types each column names, and orders
-    the columns the way read_data binds them.
+    The cleaned panel already uses the normalized 24-hour local delivery-time grid.
+    This function selects a zone, sums the production types each column names, and
+    orders the columns the way read_data binds them.
 
     Returns the local date span written, so the caller can default the test range
     to what actually exists.
     """
     panel = pd.read_parquet(panel_path)
+
+    required = {"series", "timestamp_local", "zone", "variable", "psr_type", "value"}
+    missing_columns = sorted(required - set(panel.columns))
+    if missing_columns:
+        raise ValueError(f"clean local panel is missing columns: {missing_columns}")
+    panel["timestamp_local"] = pd.to_datetime(panel["timestamp_local"])
+    if panel["timestamp_local"].dt.tz is not None:
+        raise ValueError("timestamp_local must be naive local market time")
+    if panel.duplicated(["series", "timestamp_local"]).any():
+        raise ValueError("clean local panel contains duplicate series-hours")
 
     for column in ("zone", "variable", "psr_type"):
         panel[column] = panel[column].astype("object").fillna("").astype(str)
@@ -117,12 +120,11 @@ def build_csv(panel_path, zone, layout, out_dir, dataset_name, quiet=False):
     if zone not in zones:
         raise ValueError(f"{zone} is not in the panel. It holds: {', '.join(zones)}")
 
-    matrices, dst_report = build_local_day_matrices(panel)
     specs = LAYOUTS[layout]
 
     columns, absent = {}, []
     for name, variable, psr_types in specs:
-        series, missing = series_for(panel, matrices, zone, variable, psr_types)
+        series, missing = series_for(panel, zone, variable, psr_types)
         if series is None:
             absent.append((name, variable, psr_types))
             continue
@@ -159,9 +161,6 @@ def build_csv(panel_path, zone, layout, out_dir, dataset_name, quiet=False):
     if not quiet:
         print(f"{zone}: {len(frame):,} hours, {start_date.date()} to {end_date.date()} "
               f"({len(frame) // 24:,} days), {len(frame.columns)} columns")
-        print(f"DST normalized: {len(dst_report.spring_days)} spring and "
-              f"{len(dst_report.autumn_days)} autumn transition days across "
-              f"{dst_report.series_count} series")
         print(f"written: {path}\n")
 
     return path, start_date, end_date
@@ -172,7 +171,7 @@ def main(argv=None):
         description="Run the LEAR backtest on a zone from the cleaned hourly panel.",
         epilog="Unrecognised flags are passed through to run_lear_dk1.py.")
     parser.add_argument("--panel", default=DEFAULT_PANEL,
-                        help="Cleaned hourly panel written by data_cleaning.ipynb")
+                        help="Cleaned hourly panel written by data_cleaning_v2.ipynb")
     parser.add_argument("--zone", default="DK1", help="Bidding zone (default: DK1)")
     parser.add_argument("--exog", default="load-wind-solar", choices=sorted(LAYOUTS),
                         help="Exogenous layout (default: load-wind-solar)")
@@ -184,7 +183,7 @@ def main(argv=None):
 
     if not os.path.exists(args.panel):
         print(f"error: no cleaned panel at {args.panel}", file=sys.stderr)
-        print("Run data_cleaning.ipynb to build it.", file=sys.stderr)
+        print("Run data_cleaning_v2.ipynb to build it.", file=sys.stderr)
         return 1
 
     # A name of its own, so the projected CSV never overwrites a dataset that

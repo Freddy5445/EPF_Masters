@@ -154,8 +154,8 @@ def main(argv=None):
     if args.data_start:
         data = data.loc[pd.Timestamp(args.data_start):]
 
-    # Cleaning is not this script's job: it happens once in section 7 of
-    # data_cleaning.ipynb, so the DNN and LEAR provably read identically
+    # Cleaning is not this script's job: it happens once in
+    # data_cleaning_v2.ipynb, so the DNN and LEAR provably read identically
     # prepared inputs. Filling gaps here too would re-create the two divergent
     # implementations the refactor removed.
     if data.isna().any().any():
@@ -163,7 +163,7 @@ def main(argv=None):
         print(f"error: the dataset has missing values "
               f"{counts[counts > 0].to_dict()}. The DNN cannot be fitted on NaN, "
               f"and this script no longer imputes.", file=sys.stderr)
-        print("Re-run data_cleaning.ipynb, then rebuild the CSV with "
+        print("Re-run data_cleaning_v2.ipynb, then rebuild the CSV with "
               "run_lear_from_clean.py.", file=sys.stderr)
         return 1
 
@@ -273,7 +273,7 @@ def main(argv=None):
         "hyperopt_evals": max_evals,
         "hyperopt_range": [str(hyperopt_begin.date()), str(hyperopt_end.date())],
         "data_start": str(data.index.min()),
-        "cleaning": "data_cleaning.ipynb",
+        "cleaning": "data_cleaning_v2.ipynb",
         "seconds_per_recalibration": round(
             sum(timings) / max(len(timings), 1), 1),
     }

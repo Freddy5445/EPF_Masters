@@ -276,8 +276,8 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
                 f"{test_start}; there would be no training data."
             )
 
-    # Cleaning is not this script's job any more. It happens once, in section 7
-    # of data_cleaning.ipynb, so that every model tested
+    # Cleaning is not this script's job any more. It happens once, in
+    # data_cleaning_v2.ipynb, so that every model tested
     # against this data provably sees identically prepared inputs -- a difference
     # between LEAR and the DNN is then a difference between the models. Filling
     # gaps here as well would re-create two implementations that can drift apart.
@@ -286,7 +286,7 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
         raise ValueError(
             f"The dataset contains missing values {counts[counts > 0].to_dict()}. "
             f"LEAR cannot be fitted on NaN, and this script no longer imputes. "
-            f"Re-run data_cleaning.ipynb, which applies the epftoolbox DST "
+            f"Re-run data_cleaning_v2.ipynb, which applies the epftoolbox DST "
             f"convention and the causal imputation, then rebuild the CSV with "
             f"run_lear_from_clean.py."
         )
@@ -323,7 +323,7 @@ def run_ensemble(dataset, datasets_dir, begin_test_date, end_test_date,
         "data_start": str(data_start) if data_start is not None else None,
         # What fraction of the input was invented, and how -- needed to report
         # the result honestly.
-        "cleaning": "data_cleaning.ipynb",
+        "cleaning": "data_cleaning_v2.ipynb",
         "environment": environment_metadata(),
         "started_at": pd.Timestamp.now().isoformat(),
         "windows": [],

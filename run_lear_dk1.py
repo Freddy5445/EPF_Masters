@@ -18,8 +18,8 @@ resumed with the same command):
     python run_lear_dk1.py
 
 Missing values are not handled here. All cleaning -- the local grid, the
-epftoolbox DST convention and the causal imputation -- happens once in section 7
-of data_cleaning.ipynb, so every model tested against this data provably sees
+epftoolbox DST convention and the causal imputation -- happens once in
+data_cleaning_v2.ipynb, so every model tested against this data provably sees
 identically prepared inputs. This script refuses to run on a dataset with gaps.
 
 Per-day progress, timings and an ETA are printed as it goes, and every run
@@ -51,12 +51,15 @@ DEFAULT_WINDOWS = (56, 84, 1092, 1456)
 # produce complete days.
 DEFAULT_DATA_START = "2015-01-07"
 
-# DK1 day-ahead moved to 15-minute market time units on 2025-04-08, so the
-# hourly series the epftoolbox models require ends the day before.
-DEFAULT_END_TEST = "2025-04-07"
+# DK1 and DK2 day-ahead *prices* moved to 15-minute market time units on
+# 2025-10-01, so the hourly series the epftoolbox models require ends
+# 2025-09-30. (Not to be confused with 2025-04-08, when DK1/DK2 *generation
+# forecasts* moved to 15 minutes -- a separate transition that does not bound
+# the price series.)
+DEFAULT_END_TEST = "2025-09-30"
 
 # 728 days (two 364-day "years", the epftoolbox convention) ending there.
-DEFAULT_BEGIN_TEST = "2023-04-11"
+DEFAULT_BEGIN_TEST = "2023-10-04"
 
 
 def main(argv=None):
@@ -176,7 +179,7 @@ def main(argv=None):
         # window floor after, say, a NaN error sends the reader the wrong way.
         lowered = message.lower()
         if "contains nan" in lowered or "missing value" in lowered:
-            print(f"\nRe-run data_cleaning.ipynb to rebuild the cleaned panel, "
+            print(f"\nRe-run data_cleaning_v2.ipynb to rebuild the cleaned panel, "
                   f"then rebuild this CSV with run_lear_from_clean.py.",
                   file=sys.stderr)
         elif "calibration_window" in lowered:

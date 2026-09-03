@@ -2,7 +2,7 @@
 
 This document describes the cleaning implemented in
 [`data_cleaning_v2.ipynb`](../data_cleaning_v2.ipynb). The notebook converts the
-raw ENTSO-E extract into a complete, long-form hourly UTC dataset for electricity
+raw ENTSO-E extract into a complete, long-form hourly local dataset for electricity
 price forecasting. Missing-data treatment is performed once in this shared
 pipeline so downstream models receive the same observations and assumptions.
 
@@ -20,12 +20,10 @@ The sample bounds are defined as local delivery hours in `Europe/Copenhagen`:
 The end is chosen because the next local hour marks the transition to genuinely
 quarter-hourly day-ahead prices in most retained zones.
 
-Cleaning and canonical storage remain in UTC, which preserves both physical
-hours during the autumn clock change and avoids ambiguous timestamps. This does
-not eliminate DST handling; it defers it to the shared
-[`local_day_panel.py`](../local_day_panel.py) module, which converts UTC series
-to local delivery days and applies the 24-hour EPF convention before any model
-CSV is built.
+Publication-gap detection and filling operate on the unambiguous physical UTC
+grid. Before export, the cleaning notebook converts every retained series to
+naive `Europe/Copenhagen` local market time and applies the 24-hour EPF DST
+convention. Downstream analysis and model scripts consume this result directly.
 
 ## Pipeline overview
 
@@ -40,9 +38,10 @@ nordic_baltic_raw.parquet
     |  trim the common sample and remove unusable series
     |  diagnose and fill missing hours
     |  remove constant NO2 solar
+    |  normalize DST to 24 local delivery hours per day
     |  assert completeness and uniqueness
     v
-nordic_baltic_clean_hourly_utc.parquet
+nordic_baltic_clean_hourly_local.parquet
 ```
 
 ### 1. Filter the raw extract
@@ -84,7 +83,7 @@ A source row is uniquely identified by:
 - UTC timestamp.
 
 Duplicate keys arise mainly at monthly download boundaries. They are analyzed
-before the first copy is retained. In the documented run, 27,288 redundant rows
+before the first copy is retained. In the documented run, 14,112 redundant rows
 were removed and none of the duplicated copies disagreed in value.
 
 ### 3. Convert mixed resolutions to hourly data
@@ -236,24 +235,24 @@ rows.
 
 ## Validation and output
 
-Before export, the notebook asserts that:
+Before local-time conversion, the notebook asserts that:
 
 - no duplicate `(series, timestamp_utc)` pair exists;
 - `value` contains no nulls; and
 - every retained series is gapless between its first and last hour.
 
-The output is `datasets/nordic_baltic_clean_hourly_utc.parquet`. In the documented
-run it contains **1,715,611 rows, 20 columns and 29 series**. The data remain in
-long format and retain source metadata, source resolution, slot counts and the
-imputation audit fields.
+The output is `datasets/nordic_baltic_clean_hourly_local.parquet`. In the
+documented run it contains **1,715,640 rows, 21 columns and 29 series**. It uses
+naive `timestamp_local`, contains exactly 24 rows per local delivery day and
+series, and retains source metadata, source resolution, slot counts and the
+imputation audit fields. `dst_adjustment` distinguishes `spring_interpolation`,
+`autumn_average`, and ordinary rows (`none`).
 
-## Shared local-day panel
+## Local-day normalization
 
-[`local_day_panel.py`](../local_day_panel.py) is the single UTC-to-local
-conversion used by `run_lear_from_clean.py`, which builds the CSV inputs shared
-by LEAR and all DNN configurations. It converts timestamps to
-`Europe/Copenhagen`, derives local date and hour, and returns one
-local-date-by-local-hour matrix per series.
+The cleaning notebook calls [`local_day_panel.py`](../local_day_panel.py) once
+before export. The module converts UTC timestamps to `Europe/Copenhagen`, derives
+local date and hour, and constructs one local-date-by-local-hour matrix per series.
 
 The module applies the standard 24-hour EPF convention identically to prices and
 all exogenous series:
@@ -266,8 +265,11 @@ all exogenous series:
 It rejects any missing or repeated local hour not explained by those transitions
 and asserts that every matrix has columns 00:00 through 23:00 with complete first
 and last days. The current sample yields 2,465 complete local days for every one
-of the 29 series. The assertions cover seven spring dates and six autumn dates,
-all 13 transitions in the sample.
+of the 29 series, or 59,160 model hours per series. The pre-conversion UTC panel
+has 59,159 physical hours per series: across this sample, seven inserted spring slots
+and six collapsed autumn slots produce a net increase of one row in the normalized
+local grid. The assertions cover seven spring dates and six autumn dates, all 13
+transitions in the sample.
 
 ## Methodological limitations
 
