@@ -62,9 +62,15 @@ class DNNModel:
                  batch_normalization=False, lr=None, verbose=False,
                  epochs_early_stopping=40, scaler=None, loss='mae',
                  optimizer='adam', activation='relu', initializer='glorot_uniform',
-                 regularization=None, lambda_reg=0):
+                 regularization=None, lambda_reg=0, output_zones=None):
         self.neurons = neurons
         self.dropout = dropout
+
+        # Which zone each block of 24 output columns belongs to, in the output
+        # layer's own order. Only DNN-joint passes more than one; see
+        # _obtain_metrics for what it changes and why nothing else does.
+        self.output_zones = tuple(output_zones) if output_zones else None
+        self._mae_normalisers = None
 
         if self.dropout > 1 or self.dropout < 0:
             raise ValueError('Dropout parameter must be between 0 and 1')
@@ -164,7 +170,29 @@ class DNNModel:
         return Model(inputs=[past_data], outputs=[output_layer])
 
     def _obtain_metrics(self, X, Y):
-        """Validation loss and MAE, the latter in the original price unit."""
+        """Validation loss and MAE, the latter in the original price unit.
+
+        With more than one output zone the MAE is averaged across zones *after*
+        dividing each zone by its own scale, rather than pooled across all
+        output columns on the price scale.
+
+        This matters because of how the stopping rule below works. ``loss`` is
+        computed on the standardised scale, where the per-zone target scaling has
+        already made the zones comparable; this MAE is computed on the price
+        scale, where they are not -- DE_LU and NL clear around 95 EUR/MWh against
+        SE3's 32. Upstream keeps the weights whenever *either* metric improves,
+        so a pooled price-scale MAE hands weight retention to whichever zones are
+        most expensive: precisely the imbalance the per-zone scaling exists to
+        remove, surviving in the one place it was not applied.
+
+        For a single output zone this is a division by one constant, which
+        cannot change any comparison, so it is skipped entirely and DNN-own and
+        DNN-wide keep upstream's number exactly. Only DNN-joint is affected.
+
+        The normalisers come from the validation targets, which do not change
+        between epochs, so they are computed once and cached: a scale that
+        drifted epoch to epoch would make ``bestMAE`` incomparable with itself.
+        """
         error = self.model.evaluate(X, Y, verbose=0)
         Ybar = self.model.predict(X, verbose=0)
 
@@ -175,7 +203,20 @@ class DNNModel:
             Y = self.scaler.inverse_transform(Y)
             Ybar = self.scaler.inverse_transform(Ybar)
 
-        return error, np.mean(MAE(Y, Ybar))
+        if self.output_zones is None or len(self.output_zones) < 2:
+            return error, np.mean(MAE(Y, Ybar))
+
+        # Imported here rather than at module scope: hyperopt imports this
+        # module, so a top-level import would be circular. By the time any
+        # network is fitted both modules are loaded, and the result is cached
+        # after the first epoch.
+        from .hyperopt import _per_zone_mae, _scale_normalisers
+
+        if self._mae_normalisers is None:
+            self._mae_normalisers = _scale_normalisers(Y, self.output_zones)
+        per_zone = _per_zone_mae(Y, Ybar, self.output_zones)
+        return error, float(np.mean([per_zone[z] / self._mae_normalisers[z]
+                                     for z in self.output_zones]))
 
     def _display_info_training(self, bestError, bestMAE, countNoImprovement):
         print(" Best error:\t\t{:.1e}".format(bestError))

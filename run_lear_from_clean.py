@@ -48,6 +48,12 @@ HYDRO = ("Water reservoir and hydro storage", "reservoir", None)
 LAYOUTS = {
     "load-windsolar": [PRICE, LOAD, WINDSOLAR],
     "load-wind-solar": [PRICE, LOAD, WIND, SOLAR],
+    # For zones the cleaning notebook leaves without a usable solar series --
+    # NO2 (its solar forecast is identically zero) and SE3/SE4 (theirs begin
+    # 2021-12, well after the panel's 2019-01-01 start). "load-windsolar" would
+    # produce the same two columns for them, but under a name that claims a
+    # solar component the file does not contain, so it is spelled out instead.
+    "load-wind": [PRICE, LOAD, WIND],
     # The panel carries reservoir for the hydro zones, which the CSV-building path in
     # build_dataset offers as --include-reservoir. Hydro goes last so the columns before
     # it keep the positions read_data binds on.

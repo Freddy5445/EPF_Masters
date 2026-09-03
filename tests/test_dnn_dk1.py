@@ -309,48 +309,57 @@ class TestHyperparameterFile(unittest.TestCase):
             DNN()
 
 
-class TestOptimizeImputation(unittest.TestCase):
-    """The hyperopt search must not train on NaN.
+class TestOptimizeRefusesNaN(unittest.TestCase):
+    """The hyperopt search must not train on NaN -- and must not impute either.
 
-    ``optimize()`` used to hand ``_objective`` a dfTrain/dfTest read straight
-    off disk, gaps and all -- unlike the backtest path, which imputes. A real
-    dataset's missing hours then propagated NaN into every trial's loss, and
-    hyperopt's own ``best_trial`` had nothing to pick from
-    (``hyperopt.exceptions.AllTrialsFailed``, with every trial's own status
-    showing ``ok`` and a ``nan`` loss -- it trained "successfully" on NaN).
+    ``optimize()`` once handed ``_objective`` a frame read straight off disk,
+    gaps and all: NaN propagated into every trial's loss and hyperopt had
+    nothing to pick from (``AllTrialsFailed``, with each trial's own status
+    showing ``ok`` and a ``nan`` loss -- it trained "successfully" on NaN). The
+    fix at the time was to impute here. That was the wrong place: cleaning
+    happens once, in ``data_cleaning_v2.ipynb``, so that the search and the
+    backtest cannot fill a gap differently. A gap is now an error, matching
+    ``run_dnn_dk1.py``.
     """
 
-    def test_gaps_are_imputed_before_the_objective_sees_them(self):
+    def _frames(self):
         index = pd.date_range("2023-01-01", periods=96, freq="h")
         price = np.arange(96, dtype="float64")
         exog = np.arange(96, dtype="float64") + 100
-        exog[50] = np.nan  # one-hour gap, comfortably within max_ffill's reach
-
         dfTrain = pd.DataFrame({"Price": price[:72], "Exogenous 1": exog[:72]},
                                index=index[:72])
         dfTest = pd.DataFrame({"Price": price[72:], "Exogenous 1": exog[72:]},
                               index=index[72:])
-        self.assertTrue(dfTrain.isna().any().any(), "test setup must start with a gap")
+        return index, dfTrain, dfTest
 
-        captured = {}
-
+    def _optimize(self, dfTrain, dfTest, index, captured):
         def fake_fmin(objective, **kwargs):
             captured["dfTrain"] = objective.keywords["dfTrain"]
             captured["dfTest"] = objective.keywords["dfTest"]
 
         with mock.patch("epftoolbox.data.read_data",
-                        return_value=(dfTrain, dfTest)), \
-             mock.patch("dnn_dk1.hyperopt.fmin", side_effect=fake_fmin), \
-             tempfile.TemporaryDirectory() as tmp:
+                        return_value=(dfTrain, dfTest)),              mock.patch("dnn_dk1.hyperopt.fmin", side_effect=fake_fmin),              tempfile.TemporaryDirectory() as tmp:
             dnn_hyperopt.optimize(
                 path_datasets_folder=tmp, path_hyperparameters_folder=tmp,
-                dataset="TEST", begin_test_date=index[72], end_test_date=index[-1],
-                max_evals=1, quiet=True)
+                dataset="TEST", begin_test_date=index[72],
+                end_test_date=index[-1], max_evals=1, quiet=True)
 
+    def test_a_gap_is_an_error_not_an_imputation(self):
+        index, dfTrain, dfTest = self._frames()
+        dfTrain.iloc[50, 1] = np.nan
+        with self.assertRaises(ValueError) as caught:
+            self._optimize(dfTrain, dfTest, index, {})
+        message = str(caught.exception)
+        self.assertIn("Exogenous 1", message)
+        self.assertIn("data_cleaning_v2", message)
+
+    def test_a_clean_frame_reaches_the_objective_untouched(self):
+        index, dfTrain, dfTest = self._frames()
+        captured = {}
+        self._optimize(dfTrain, dfTest, index, captured)
         self.assertIn("dfTrain", captured, "fmin was never called")
-        seen = pd.concat([captured["dfTrain"], captured["dfTest"]])
-        self.assertFalse(seen.isna().any().any(),
-                         "optimize() must impute gaps before the search sees them")
+        pd.testing.assert_frame_equal(captured["dfTrain"], dfTrain)
+        pd.testing.assert_frame_equal(captured["dfTest"], dfTest)
 
 
 class TestSearchSpace(unittest.TestCase):
