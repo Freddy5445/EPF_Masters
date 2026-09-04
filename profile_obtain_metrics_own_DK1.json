@@ -1,0 +1,146 @@
+[
+  {
+    "tag": "A_baseline_evaluate+predict",
+    "epochs": 75,
+    "wall_seconds": 10.712,
+    "train_seconds": 4.301,
+    "evaluate_seconds": 3.277,
+    "predict_seconds": 3.114,
+    "numpy_seconds": 0.004,
+    "bookkeeping_seconds": 0.015,
+    "accounted_seconds": 10.712,
+    "validation_share_of_wall": 0.5967,
+    "evaluate_share_of_wall": 0.306,
+    "ms_per_epoch_train": 57.35,
+    "ms_per_epoch_evaluate": 43.7,
+    "ms_per_epoch_predict": 41.52,
+    "best": [
+      17.068740844726562,
+      17.06874293263254
+    ],
+    "neurons": [
+      488
+    ],
+    "config": "own_DK1"
+  },
+  {
+    "tag": "B_predict_only_numpy_loss",
+    "epochs": 75,
+    "wall_seconds": 7.567,
+    "train_seconds": 4.389,
+    "evaluate_seconds": 0.0,
+    "predict_seconds": 3.155,
+    "numpy_seconds": 0.007,
+    "bookkeeping_seconds": 0.014,
+    "accounted_seconds": 7.566,
+    "validation_share_of_wall": 0.417,
+    "evaluate_share_of_wall": 0.0,
+    "ms_per_epoch_train": 58.53,
+    "ms_per_epoch_evaluate": 0.0,
+    "ms_per_epoch_predict": 42.07,
+    "best": [
+      17.06874293263254,
+      17.06874293263254
+    ],
+    "neurons": [
+      488
+    ],
+    "config": "own_DK1"
+  },
+  {
+    "tag": "C_baseline_valbatch=all",
+    "epochs": 75,
+    "wall_seconds": 9.556,
+    "train_seconds": 4.37,
+    "evaluate_seconds": 2.712,
+    "predict_seconds": 2.455,
+    "numpy_seconds": 0.004,
+    "bookkeeping_seconds": 0.015,
+    "accounted_seconds": 9.555,
+    "validation_share_of_wall": 0.5407,
+    "evaluate_share_of_wall": 0.2838,
+    "ms_per_epoch_train": 58.26,
+    "ms_per_epoch_evaluate": 36.15,
+    "ms_per_epoch_predict": 32.74,
+    "best": [
+      17.068742752075195,
+      17.06874293263254
+    ],
+    "neurons": [
+      488
+    ],
+    "config": "own_DK1"
+  },
+  {
+    "tag": "D_predict_only_valbatch=all",
+    "epochs": 75,
+    "wall_seconds": 6.859,
+    "train_seconds": 4.381,
+    "evaluate_seconds": 0.0,
+    "predict_seconds": 2.456,
+    "numpy_seconds": 0.007,
+    "bookkeeping_seconds": 0.014,
+    "accounted_seconds": 6.858,
+    "validation_share_of_wall": 0.3581,
+    "evaluate_share_of_wall": 0.0,
+    "ms_per_epoch_train": 58.41,
+    "ms_per_epoch_evaluate": 0.0,
+    "ms_per_epoch_predict": 32.75,
+    "best": [
+      17.06874293263254,
+      17.06874293263254
+    ],
+    "neurons": [
+      488
+    ],
+    "config": "own_DK1"
+  },
+  {
+    "tag": "E_model_call_numpy_loss",
+    "epochs": 75,
+    "wall_seconds": 4.658,
+    "train_seconds": 4.357,
+    "evaluate_seconds": 0.0,
+    "predict_seconds": 0.282,
+    "numpy_seconds": 0.006,
+    "bookkeeping_seconds": 0.013,
+    "accounted_seconds": 4.658,
+    "validation_share_of_wall": 0.0605,
+    "evaluate_share_of_wall": 0.0,
+    "ms_per_epoch_train": 58.09,
+    "ms_per_epoch_evaluate": 0.0,
+    "ms_per_epoch_predict": 3.76,
+    "best": [
+      17.06874293263254,
+      17.06874293263254
+    ],
+    "neurons": [
+      488
+    ],
+    "config": "own_DK1"
+  },
+  {
+    "tag": "A2_baseline_repeat",
+    "epochs": 75,
+    "wall_seconds": 10.62,
+    "train_seconds": 4.283,
+    "evaluate_seconds": 3.24,
+    "predict_seconds": 3.078,
+    "numpy_seconds": 0.004,
+    "bookkeeping_seconds": 0.014,
+    "accounted_seconds": 10.62,
+    "validation_share_of_wall": 0.595,
+    "evaluate_share_of_wall": 0.3051,
+    "ms_per_epoch_train": 57.11,
+    "ms_per_epoch_evaluate": 43.21,
+    "ms_per_epoch_predict": 41.04,
+    "best": [
+      17.068740844726562,
+      17.06874293263254
+    ],
+    "neurons": [
+      488
+    ],
+    "config": "own_DK1"
+  }
+]

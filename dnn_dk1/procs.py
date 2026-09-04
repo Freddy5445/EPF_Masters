@@ -91,8 +91,13 @@ def live_workers(run):
     def match(argv):
         if WORKER_SCRIPT not in [os.path.basename(a) for a in argv]:
             return False
-        if run.config == "joint":
-            return has_pair(argv, "--config", "joint")
+        from .runs import JOINT_CONFIGS
+
+        if run.config in JOINT_CONFIGS:
+            # The joint runs are identified by config alone: they have no focal
+            # zone, so the --zone the launcher passes is a placeholder and must
+            # not be matched on.
+            return has_pair(argv, "--config", run.config)
         return (has_pair(argv, "--config", run.config)
                 and has_pair(argv, "--zone", run.focal))
 

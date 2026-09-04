@@ -1,27 +1,39 @@
 """
-Backtest the DNN in one of three configurations, with daily recalibration.
+Backtest the DNN in one of four configurations, with daily recalibration.
 
-    python run_dnn_dk1.py --config own   --zone DK1 --smoke
-    python run_dnn_dk1.py --config wide  --zone DK1 --smoke
-    python run_dnn_dk1.py --config joint --smoke
+    python run_dnn_dk1.py --config own      --zone DK1 --smoke
+    python run_dnn_dk1.py --config wide     --zone DK1 --smoke
+    python run_dnn_dk1.py --config joint_dk --smoke
+    python run_dnn_dk1.py --config joint    --smoke
 
-The three configurations decompose the effect of cross-zonal information into an
-*input* effect and an *output* effect:
+The four configurations decompose the effect of cross-zonal information into an
+*input* effect and an *output* effect, and then ask how far the output effect
+extends:
 
-===========  ==========================  ==========  =========  ==============
-Config       Inputs                      Width       Outputs    Runs
-===========  ==========================  ==========  =========  ==============
-``own``      the zone's own series        313 / 241  24         one per zone (7)
-``wide``     every zone in Z              1969       24         DK1, DK2 (2)
-``joint``    every zone in Z              1969       168        one (1)
-===========  ==========================  ==========  =========  ==============
+============  ==========================  ==========  =========  ==============
+Config        Inputs                      Width       Outputs    Runs
+============  ==========================  ==========  =========  ==============
+``own``       the zone's own series        313 / 241  24         one per zone (7)
+``wide``      every zone in Z              1969       24         DK1, DK2 (2)
+``joint_dk``  every zone in Z              1969       48         one (1)
+``joint``     every zone in Z              1969       168        one (1)
+============  ==========================  ==========  =========  ==============
+
+``own -> wide`` is the input effect: the same 24-output network, given every
+zone's series instead of its own. ``wide -> joint_dk`` is the output effect: the
+same inputs and the same search space, forecasting DK1 and DK2 from one head
+instead of two networks -- Lago et al. (2018b)'s dual-market forecaster.
+``joint_dk -> joint`` asks whether the five less-related auxiliary zones add to
+that or dilute it, which is this thesis's own extension and the empirical test of
+the interconnection criterion.
 
 ``own`` is Lago et al. (2021) unmodified -- the same 11 (or 14) binary feature
-toggles, the same architecture ranges, the same objective. ``wide`` and ``joint``
-share an **identical** input space and an **identical** search space; only the
-output layer differs. That is what makes ``wide -> joint`` a clean measurement of
-the output effect rather than a confounded one. See ``dnn_dk1/hyperopt.py`` for
-why the block toggles are dropped there and replaced by the L1 penalty.
+toggles, the same architecture ranges, the same objective. ``wide``, ``joint_dk``
+and ``joint`` share an **identical** input space and an **identical** search
+space; only the width of the output layer differs. That is what makes each step
+above a clean measurement rather than a confounded one. See
+``dnn_dk1/hyperopt.py`` for why the block toggles are dropped there and replaced
+by the L1 penalty.
 
 ``--smoke`` runs a short search and a few days. It proves the pipeline runs; it
 proves nothing about accuracy. The paper searches 1500 hyperparameter
@@ -72,7 +84,7 @@ DEFAULT_OUT = os.path.join(THIS_DIR, "experiments")
 DEFAULT_PANEL = os.path.join(
     THIS_DIR, "datasets", "nordic_baltic_clean_hourly_local.parquet")
 
-CONFIGS = ("own", "wide", "joint")
+CONFIGS = ("own", "wide", "joint_dk", "joint")
 
 # The reported test period, identical to the LEAR thesis run and to every
 # configuration here -- an unequal test period would confound the comparison
@@ -149,14 +161,19 @@ def dataset_name(config, zone):
         return Z.dataset_name(zone)
     if config == "wide":
         return f"dnnwide_{zone}"
+    if config == "joint_dk":
+        return "dnnjointdk"
     return "dnnjoint"
 
 
 def out_zones_for(config, zone):
-    """Which zones the output layer covers."""
-    if config == "joint":
-        return Z.ZONES
-    return (zone,)
+    """Which zones the output layer covers.
+
+    Delegated to ``dnn_dk1.runs`` so the launcher, the status tool and the
+    pre-flight cannot disagree with this script about how wide a run's output
+    head is.
+    """
+    return RS.out_zones_for(config, zone)
 
 
 def input_zones_for(config, zone):
@@ -416,9 +433,13 @@ def build_models(config, zone, seeds, hyper_dir, nlayers, calibration_years):
 
 
 def forecast_columns(config, zone):
-    """Column names of a seed's forecast file."""
-    if config == "joint":
-        return Z.target_names(Z.ZONES)
+    """Column names of a seed's forecast file.
+
+    A multi-zone head writes one column per (zone, hour) so the file says which
+    zone each number belongs to; a 24-output run writes bare hours.
+    """
+    if config in RS.JOINT_CONFIGS:
+        return Z.target_names(out_zones_for(config, zone))
     return HOURS
 
 
@@ -455,9 +476,11 @@ def main(argv=None):
     parser.add_argument("--config", default="own", choices=CONFIGS,
                         help="own: the zone's own inputs, 24 outputs (Lago "
                              "unmodified). wide: every zone's inputs, 24 "
-                             "outputs. joint: every zone's inputs, 168 outputs.")
+                             "outputs. joint_dk: every zone's inputs, 48 "
+                             "outputs (DK1+DK2). joint: every zone's inputs, "
+                             "168 outputs (all of Z).")
     parser.add_argument("--zone", "--dataset", dest="zone", default="DK1",
-                        help="Focal zone. Ignored by --config joint.")
+                        help="Focal zone. Ignored by the joint configurations.")
     parser.add_argument("--datasets-dir", default=DEFAULT_DATASETS)
     parser.add_argument("--panel", default=DEFAULT_PANEL)
     parser.add_argument("--out-dir", default=DEFAULT_OUT)
@@ -505,8 +528,8 @@ def main(argv=None):
     from dnn_dk1 import hyperopt as dnn_hyperopt
 
     config = args.config
-    zone = args.zone if config != "joint" else Z.ZONES[0]
-    if config != "joint" and zone not in Z.ZONES:
+    zone = args.zone if config not in RS.JOINT_CONFIGS else Z.ZONES[0]
+    if config not in RS.JOINT_CONFIGS and zone not in Z.ZONES:
         print(f"error: {zone} is not in Z = {', '.join(Z.ZONES)}", file=sys.stderr)
         return 1
 
@@ -628,7 +651,8 @@ def main(argv=None):
     cadence = args.recalibration_days
     refits = RS.refit_days(begin_test, end_test, cadence)
     max_days_per_process = args.max_days_per_process
-    run_id_label = f"{config}" + (f"_{zone}" if config != "joint" else "")
+    run_id_label = f"{config}" + (f"_{zone}" if config not in RS.JOINT_CONFIGS
+                                  else "")
     out_zones = out_zones_for(config, zone)
     print(f"[{config}] {len(days)} forecast day(s) from {len(refits)} refit(s) "
           f"(recalibrating every {cadence} day(s)), {len(seeds)} seed(s), "
@@ -644,7 +668,8 @@ def main(argv=None):
     os.makedirs(run_dir, exist_ok=True)
 
     columns = forecast_columns(config, zone)
-    prefix = "forecasts_joint_seed" if config == "joint" else "forecasts_seed"
+    prefix = ("forecasts_joint_seed" if config in RS.JOINT_CONFIGS
+              else "forecasts_seed")
     forecast_paths = {s: os.path.join(run_dir, f"{prefix}{s}.csv") for s in seeds}
     timing_paths = {s: os.path.join(run_dir, f"timings_seed{s}.csv") for s in seeds}
 
@@ -811,7 +836,7 @@ def main(argv=None):
         "model": "DNN",
         "config": config,
         "dataset": name,
-        "zone": zone if config != "joint" else None,
+        "zone": zone if config not in RS.JOINT_CONFIGS else None,
         "input_zones": list(input_zones_for(config, zone)),
         "output_zones": list(out_zones),
         "n_inputs": expected_input_width(config, zone),
@@ -862,8 +887,9 @@ def main(argv=None):
     # dominated by whichever zones happen to be easiest.
     from lear_dk1.evaluate import evaluate_run
 
-    targets = ({z: d for z, d in write_zone_slices(run_dir, seeds, Z.ZONES).items()}
-               if config == "joint" else {zone: run_dir})
+    targets = ({z: d for z, d in
+                write_zone_slices(run_dir, seeds, out_zones).items()}
+               if config in RS.JOINT_CONFIGS else {zone: run_dir})
     failures = []
     for scored_zone, directory in targets.items():
         try:

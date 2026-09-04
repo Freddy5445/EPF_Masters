@@ -310,7 +310,8 @@ def smoke_run(run, out_dir, datasets_dir, timeout=3600):
     end = begin + pd.Timedelta(days=SMOKE_DAYS - 1)
     run_dir = R.run_dir_for(run.config, run.focal, begin, end, out_dir, smoke=True)
 
-    prefix = "forecasts_joint_seed" if run.config == "joint" else "forecasts_seed"
+    prefix = ("forecasts_joint_seed" if run.config in RS.JOINT_CONFIGS
+              else "forecasts_seed")
     forecast_path = os.path.join(run_dir, f"{prefix}{SMOKE_SEED}.csv")
     timing_path = os.path.join(run_dir, f"timings_seed{SMOKE_SEED}.csv")
 

@@ -16,6 +16,11 @@ work. This module therefore reproduces the same architecture and the same
 training procedure rather than inventing anything: same layer stack, same
 custom early-stopping loop, same batch size, same epoch cap, same metrics.
 
+One thing is computed differently, and only differently: upstream evaluates the
+validation set twice per epoch, once through ``evaluate`` and once through
+``predict``. ``_obtain_metrics`` does it once. Same numbers, roughly half the
+wall time -- see that method.
+
 The vendored ``epftoolbox/`` tree is not modified. Where a piece of upstream is
 pure numpy/pandas -- the feature construction and the scalers -- it is imported
 and reused, because a hand-rewritten copy of that is exactly how a model quietly
@@ -85,6 +90,9 @@ class DNNModel:
         self.initializer = initializer
         self.regularization = regularization
         self.lambda_reg = lambda_reg
+        # Kept because _obtain_metrics recomputes this loss in numpy, and can
+        # only do that for the one it knows.
+        self.loss = loss
 
         self.model = self._build_model()
 
@@ -172,6 +180,39 @@ class DNNModel:
     def _obtain_metrics(self, X, Y):
         """Validation loss and MAE, the latter in the original price unit.
 
+        **One forward pass, not two.** Upstream calls ``model.evaluate(X, Y)``
+        and then ``model.predict(X)``: the same forward pass over the same
+        validation set, run twice, every epoch. Both are replaced by a single
+        ``model(X, training=False)``, with the loss recomputed from the
+        predictions in numpy. Measured on this project's own configurations
+        that is 47% of a DNN-joint fit and 57% of a DNN-own one, and almost none
+        of it is arithmetic: the validation set is a third the size of the
+        training set, yet each pass cost about as much as the whole training
+        epoch, because ``evaluate`` and ``predict`` run twelve batches of 32
+        apiece against ``fit``'s six of 192, and each carries the full Keras
+        Trainer machinery -- data adapter, callback list, per-batch dispatch,
+        output concatenation -- for one small array.
+        ``profile_obtain_metrics.py`` reproduces the measurement and rechecks
+        the equivalence.
+
+        One term is what makes the substitution exact. ``evaluate`` returns the
+        compiled loss **plus every regularisation penalty on the graph**, and
+        ``reg`` is a searched hyperparameter: near the top of the lambda range
+        the penalty is 90% of the returned value, so a bare MAE would quietly
+        replace the early-stopping criterion with a different one -- for
+        whichever trials happened to draw l1, DNN-joint's selected model among
+        them. The penalty is a function of the weights alone and Keras exposes
+        it as ``model.losses``, so adding it back reproduces ``evaluate`` to
+        float precision. Checked at reg=None/l1/l2 and lambda=1e-4/1e-2, and end
+        to end: own, wide and joint each reach the same epoch and the same best
+        metrics either way.
+
+        What is not reproduced is representation, not arithmetic: this loss is
+        float64 where Keras' is float32, a relative difference of order 1e-7. It
+        moved no stopping decision across the epochs profiled, but forecasts
+        made before this change are not bit-identical to forecasts made after
+        it.
+
         With more than one output zone the MAE is averaged across zones *after*
         dividing each zone by its own scale, rather than pooled across all
         output columns on the price scale.
@@ -193,8 +234,24 @@ class DNNModel:
         between epochs, so they are computed once and cached: a scale that
         drifted epoch to epoch would make ``bestMAE`` incomparable with itself.
         """
-        error = self.model.evaluate(X, Y, verbose=0)
-        Ybar = self.model.predict(X, verbose=0)
+        if self.loss != 'mae':
+            # The recomputation below *is* the 'mae' loss. Any other compiled
+            # loss has to come from Keras; falling back is better than quietly
+            # reporting a number the model was not trained on.
+            error = self.model.evaluate(X, Y, verbose=0)
+            Ybar = self.model.predict(X, verbose=0)
+        else:
+            # The model is built as Model(inputs=[t], outputs=[t]), so its input
+            # structure is a one-element list. A bare array works but warns on
+            # every epoch. training=False is what puts dropout and batch
+            # normalisation in inference mode, which is what predict() did here.
+            out = self.model([X], training=False)
+            Ybar = np.asarray(out[0] if isinstance(out, (list, tuple)) else out)
+            error = float(np.mean(np.abs(np.asarray(Y, dtype=float) - Ybar)))
+            # Read after the forward pass. Keras recomputes these from the
+            # current weights on each call rather than accumulating them.
+            if self.model.losses:
+                error += float(sum(float(term) for term in self.model.losses))
 
         if self.scaler is not None:
             if len(Y.shape) == 1:

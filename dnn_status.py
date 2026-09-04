@@ -164,7 +164,10 @@ def _run_dir_for(run, out_dir):
 
 def _read_forecasts(run_dir, config):
     """Completed days per seed, from the checkpoints themselves."""
-    prefix = "forecasts_joint_seed" if config == "joint" else "forecasts_seed"
+    from dnn_dk1 import runs as RS
+
+    prefix = ("forecasts_joint_seed" if config in RS.JOINT_CONFIGS
+              else "forecasts_seed")
     per_seed = {}
     for path in sorted(glob.glob(os.path.join(run_dir, f"{prefix}*.csv"))):
         match = re.search(rf"{prefix}(\d+)\.csv$", os.path.basename(path))

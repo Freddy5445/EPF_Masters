@@ -13,7 +13,8 @@ a launch relying on ``DETACHED_PROCESS`` alone did produce ten console windows,
 and closing three of them killed three runs. See ``_popen_detached``.
 One run crashing has no effect on the other nine.
 
-Order is ``joint`` first, then the two ``wide``, then the seven ``own``.
+Order is ``joint``, then ``joint_dk``, then the two ``wide``, then the seven
+``own``.
 ``joint`` is the critical path -- roughly 21 hours against 5 for an ``own`` run --
 so it starts first and is never left waiting behind cheaper work.
 
@@ -342,8 +343,9 @@ def schedule(args):
 
     * **Admission.** Ten processes on eight physical cores is what made joint
       nine times slower than it was measured alone. At most
-      ``MAX_OTHER_CONCURRENT`` single-threaded runs run beside joint's four
-      threads -- eight threads on eight cores -- and the rest wait.
+      ``MAX_OTHER_CONCURRENT`` single-threaded runs run beside the one resident
+      joint-class run's four threads -- eight threads on eight cores -- and the
+      rest wait. ``joint`` and ``joint_dk`` share that one slot.
     * **Chunking.** A worker exits with ``CHUNK_INCOMPLETE`` after about a
       hundred forecast days so its heap goes back to the operating system. The
       run is not finished; it is handed over. Restarting it here, rather than
@@ -419,11 +421,11 @@ def schedule(args):
                 return 0
 
             # --- admit --------------------------------------------------
-            others_running = sum(1 for r in running if r.config != "joint")
-            joint_running = any(r.config == "joint" for r in running)
+            others_running = sum(1 for r in running if not r.heavy)
+            joint_running = any(r.heavy for r in running)
 
             for run in queued:
-                if run.config == "joint":
+                if run.heavy:
                     if joint_running:
                         continue
                     joint_running = True
@@ -722,15 +724,18 @@ def _admission_plan(runs):
     """
     from dnn_dk1 import runs as RS
 
-    joint = [r for r in runs if r.config == "joint"]
-    others = [r for r in runs if r.config != "joint"]
+    # One joint-class run and up to MAX_OTHER_CONCURRENT single-threaded runs
+    # are resident at a time, so each wave takes one from each queue. The second
+    # joint run waits for the first to finish rather than sharing the slot.
+    joint = [r for r in runs if r.heavy]
+    others = [r for r in runs if not r.heavy]
+
     waves = []
-    first = joint + others[:RS.MAX_OTHER_CONCURRENT]
-    if first:
-        waves.append(first)
-    rest = others[RS.MAX_OTHER_CONCURRENT:]
-    for i in range(0, len(rest), RS.MAX_OTHER_CONCURRENT):
-        waves.append(rest[i:i + RS.MAX_OTHER_CONCURRENT])
+    while joint or others:
+        wave = joint[:1] + others[:RS.MAX_OTHER_CONCURRENT]
+        joint = joint[1:]
+        others = others[RS.MAX_OTHER_CONCURRENT:]
+        waves.append(wave)
     return waves
 
 
