@@ -20,6 +20,7 @@ reimplementation silently stops matching the paper.
 
 import os
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -125,9 +126,17 @@ class DNN:
             day)
 
     def _regularize_data(self, Xtrain, Xval, Xtest, Ytrain, Yval):
-        """Scale inputs and outputs by whatever hyperopt chose."""
+        """Scale inputs and outputs by whatever hyperopt chose.
+
+        The X scaler is kept on the instance, not discarded. With a
+        recalibration cadence wider than a day the same fitted network forecasts
+        a later day too, and that day's inputs must go through the scaler fitted
+        on *this* training window -- refitting a scaler on the new day's single
+        row would be a different transform, and silently so.
+        """
+        self.scalerX = None
         if self.best_hyperparameters['scaleX'] in ['Norm', 'Norm1', 'Std', 'Median', 'Invariant']:
-            [Xtrain, Xval, Xtest], _ = guarded_scaling(
+            [Xtrain, Xval, Xtest], self.scalerX = guarded_scaling(
                 [Xtrain, Xval, Xtest], self.best_hyperparameters['scaleX'])
 
         if self.best_hyperparameters['scaleY'] in ['Norm', 'Norm1', 'Std', 'Median', 'Invariant']:
@@ -170,6 +179,79 @@ class DNN:
         Yp = self.predict(X=Xtest)
         self.model.clear_session()
         return Yp
+
+    def _predict_rows(self, Xtest):
+        """Predict already-built, already-scaled test rows. One row per day."""
+        Yp = self.model.predict(Xtest)
+        if self.best_hyperparameters['scaleY'] in ['Norm', 'Norm1', 'Std',
+                                                   'Median', 'Invariant']:
+            Yp = self.scaler.inverse_transform(
+                np.asarray(Yp, dtype=float).reshape(Xtest.shape[0], -1))
+        return np.asarray(Yp, dtype=float).reshape(Xtest.shape[0], -1)
+
+    def recalibrate_and_forecast_days(self, df, refit_day, days):
+        """Fit once at ``refit_day``, then forecast every day in ``days``.
+
+        This is :meth:`recalibrate_and_forecast_next_day` generalised to a
+        recalibration cadence: one fit, several forecast days. Training still
+        stops strictly before ``refit_day``, so a day later in ``days`` is
+        forecast by a model that is up to ``cadence - 1`` days stale -- but its
+        *inputs* are rebuilt for that day, from prices and forecasts known at its
+        own gate closure. Staleness in the weights, never a look-ahead in the
+        features.
+
+        Returns ``(predictions, seconds)``: an array with one row per day, and
+        the wall time split into the fit and each day's forward pass, so the
+        timing file can show what the cadence actually bought.
+        """
+        import keras
+        keras.utils.set_random_seed(self._draw_seed(refit_day))
+
+        days = pd.DatetimeIndex(days)
+        started = time.time()
+
+        df_train = df.loc[:refit_day - pd.Timedelta(hours=1)]
+        df_train = df_train.loc[
+            refit_day - pd.Timedelta(hours=self.calibration_window * 364 * 24):]
+
+        # Trimmed to what the wanted days need: two weeks of history for the
+        # lags, and nothing past the last day being forecast. Left untrimmed,
+        # upstream would build a test row for every remaining day in the panel
+        # on every refit.
+        df_test = df.loc[days[0] - pd.Timedelta(weeks=2):
+                         days[-1] + pd.Timedelta(hours=23), :]
+
+        Xtrain, Ytrain, Xval, Yval, Xtest, _, index_test = _build_and_split_XYs(
+            dfTrain=df_train, features=self.best_hyperparameters,
+            shuffle_train=True, dfTest=df_test, date_test=None,
+            data_augmentation=self.data_augmentation,
+            n_exogenous_inputs=len(df_train.columns) - 1)
+
+        rows = pd.DatetimeIndex(index_test).get_indexer(days)
+        if (rows < 0).any():
+            missing = [str(d.date()) for d, r in zip(days, rows) if r < 0]
+            raise ValueError(
+                f"no test row built for {missing}; the panel does not reach "
+                f"those days")
+        Xtest = Xtest[rows]
+
+        Xtrain, Xval, Xtest, Ytrain, Yval = self._regularize_data(
+            Xtrain=Xtrain, Xval=Xval, Xtest=Xtest, Ytrain=Ytrain, Yval=Yval)
+
+        self.recalibrate(Xtrain=Xtrain, Ytrain=Ytrain, Xval=Xval, Yval=Yval)
+        fit_seconds = time.time() - started
+
+        predictions, predict_seconds = [], []
+        for row in range(Xtest.shape[0]):
+            one = time.time()
+            predictions.append(self._predict_rows(Xtest[row:row + 1])[0])
+            predict_seconds.append(time.time() - one)
+
+        self.model.clear_session()
+        return np.asarray(predictions, dtype=float), {
+            "fit_seconds": fit_seconds,
+            "predict_seconds": predict_seconds,
+        }
 
     def predict(self, X):
         Yp = self.model.predict(X).squeeze()
@@ -373,8 +455,10 @@ class MultiZoneDNN:
             include_calendar)
 
         scale_x = self.best_hyperparameters["scaleX"]
+        self.scalerX = None
         if scale_x in ["Norm", "Norm1", "Std", "Median", "Invariant"]:
-            [Xtrain, Xval, Xtest], _ = guarded_scaling([Xtrain, Xval, Xtest], scale_x)
+            [Xtrain, Xval, Xtest], self.scalerX = guarded_scaling(
+                [Xtrain, Xval, Xtest], scale_x)
 
         scale_y = self.best_hyperparameters["scaleY"]
         if scale_y in ["Norm", "Norm1", "Std", "Median", "Invariant"]:
@@ -402,6 +486,75 @@ class MultiZoneDNN:
             Yp = self.scaler.inverse_transform(Yp)
         self.model.clear_session()
         return np.asarray(Yp, dtype=float).reshape(1, -1)
+
+    def recalibrate_and_forecast_days(self, matrices, refit_day, days):
+        """Fit once at ``refit_day``, then forecast every day in ``days``.
+
+        The multi-zone counterpart of :meth:`DNN.recalibrate_and_forecast_days`,
+        and the same contract: training stops strictly before ``refit_day``,
+        every forecast day gets inputs built for itself, and only the weights
+        age. Returns ``(predictions, seconds)`` with one row per day.
+        """
+        from . import zones as _zones
+
+        import keras
+        keras.utils.set_random_seed(self._draw_seed(refit_day))
+
+        days = pd.DatetimeIndex(days)
+        started = time.time()
+
+        train_days = self.training_days(matrices, refit_day)
+        if not len(train_days):
+            raise ValueError(
+                f"no training days before {refit_day.date()} inside the "
+                f"{self.calibration_window}-year window")
+
+        include_calendar = self.include_calendar
+        X = _zones.build_X(matrices, train_days, self.zones, include_calendar)
+        Y = _zones.build_Y(matrices, train_days, self.out_zones)
+        Xtrain, Ytrain, Xval, Yval = _zones.split_train_val(
+            X, Y, shuffle_train=True, hyperoptimization=False)
+        Xtest = _zones.build_X(matrices, days, self.zones, include_calendar)
+
+        scale_x = self.best_hyperparameters["scaleX"]
+        self.scalerX = None
+        if scale_x in ["Norm", "Norm1", "Std", "Median", "Invariant"]:
+            [Xtrain, Xval, Xtest], self.scalerX = guarded_scaling(
+                [Xtrain, Xval, Xtest], scale_x)
+
+        scale_y = self.best_hyperparameters["scaleY"]
+        if scale_y in ["Norm", "Norm1", "Std", "Median", "Invariant"]:
+            self.scaler = _zones.PerZoneScaler(scale_y, self.out_zones)
+            y_train_s = self.scaler.fit_transform(Ytrain)
+            y_val_s = self.scaler.transform(Yval)
+            self.transformed_dispersion = self.scaler.dispersion(y_train_s)
+        else:
+            self.scaler = None
+            y_train_s, y_val_s = Ytrain, Yval
+            self.transformed_dispersion = {
+                z: float(np.std(Ytrain[:, _zones.zone_slice(z, self.out_zones)]))
+                for z in self.out_zones}
+
+        self.recalibrate(Xtrain, y_train_s, Xval, y_val_s)
+        fit_seconds = time.time() - started
+
+        self.zone_weights = first_layer_weight_magnitudes(
+            self.model, _zones.feature_zone_labels(self.zones, include_calendar))
+
+        predictions, predict_seconds = [], []
+        for row in range(Xtest.shape[0]):
+            one = time.time()
+            Yp = self.model.predict(Xtest[row:row + 1])
+            if self.scaler is not None:
+                Yp = self.scaler.inverse_transform(Yp)
+            predictions.append(np.asarray(Yp, dtype=float).reshape(-1))
+            predict_seconds.append(time.time() - one)
+
+        self.model.clear_session()
+        return np.asarray(predictions, dtype=float), {
+            "fit_seconds": fit_seconds,
+            "predict_seconds": predict_seconds,
+        }
 
     def recalibrate(self, Xtrain, Ytrain, Xval, Yval):
         """Train a fresh network from scratch on this window."""

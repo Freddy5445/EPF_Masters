@@ -35,6 +35,7 @@ a trailing ``\`` is not a line continuation and truncates the command.
 """
 
 import argparse
+import gc
 import io
 import json
 import os
@@ -55,7 +56,13 @@ import pandas as pd  # noqa: E402
 # backtest's, or the two models would recover differently from an interruption.
 from lear_dk1.backtest import _load_checkpoint  # noqa: E402
 
+from dnn_dk1 import runs as RS  # noqa: E402
 from dnn_dk1 import zones as Z  # noqa: E402
+
+# Returned when this process stopped on its day budget with days still to go.
+# Distinct from 0 (finished) and from a crash, so the scheduler can tell a
+# planned handover from a failure without parsing a log.
+CHUNK_INCOMPLETE = 75
 
 HOURS = [f"h{h}" for h in range(24)]
 
@@ -88,6 +95,43 @@ def _append_timing(path, row):
     """Append one row to a per-seed timing file, writing the header once."""
     header = not os.path.exists(path)
     pd.DataFrame([row]).to_csv(path, mode="a", header=header, index=False)
+
+
+def _sample_rss(path, run_label, chunk_days, days_done, note):
+    """Record this process's resident set size in its own run directory.
+
+    Written here rather than straight into ``progress_log.csv`` because up to
+    five runs are alive at once and interleaved appends from five processes
+    would corrupt a shared file. Each run owns this one; ``dnn_status`` reads
+    them and puts the number into ``progress_log.csv``, which has a single
+    writer.
+
+    The growth is the thing to watch: the first launch died on an
+    ArrayMemoryError after about six hours, and phase 1's peak RSS was measured
+    over five recalibrations, which cannot show a trend.
+    """
+    try:
+        import psutil
+
+        info = psutil.Process().memory_info()
+        rss = int(getattr(info, "peak_wset", info.rss))
+        current = int(info.rss)
+    except Exception:
+        return
+    header = not os.path.exists(path)
+    try:
+        pd.DataFrame([{
+            "timestamp": pd.Timestamp.utcnow().isoformat(),
+            "run": run_label,
+            "pid": os.getpid(),
+            "chunk_days": chunk_days,
+            "days_done": days_done,
+            "rss_bytes": current,
+            "peak_rss_bytes": rss,
+            "note": note,
+        }]).to_csv(path, mode="a", header=header, index=False)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +471,19 @@ def main(argv=None):
                         help=f"Hyperopt evaluations (paper: {DEFAULT_MAX_EVALS}). "
                              f"Must be identical across all ten runs.")
     parser.add_argument("--nlayers", type=int, default=2)
+    parser.add_argument("--recalibration-days", type=int,
+                        default=RS.RECALIBRATION_DAYS,
+                        help=f"Refit every N days and reuse the fit for the "
+                             f"days between (default: {RS.RECALIBRATION_DAYS}). "
+                             f"Every day is still forecast, with inputs built "
+                             f"for itself; only the weights age.")
+    parser.add_argument("--max-days-per-process", type=int,
+                        default=RS.DAYS_PER_PROCESS,
+                        help=f"Exit cleanly after this many newly forecast days "
+                             f"so the scheduler can restart from the checkpoint "
+                             f"(default: {RS.DAYS_PER_PROCESS}; 0 = no limit). "
+                             f"TensorFlow's heap grows across hundreds of model "
+                             f"builds and clear_session() does not give it back.")
     parser.add_argument("--calibration-years", type=int,
                         default=DEFAULT_CALIBRATION_YEARS,
                         help="Training window in YEARS (the DNN's unit, not days)")
@@ -567,11 +624,19 @@ def main(argv=None):
         n_exogenous = None
 
     days = pd.date_range(begin_test, end_test, freq="D")
+    day_set = set(days)
+    cadence = args.recalibration_days
+    refits = RS.refit_days(begin_test, end_test, cadence)
+    max_days_per_process = args.max_days_per_process
+    run_id_label = f"{config}" + (f"_{zone}" if config != "joint" else "")
     out_zones = out_zones_for(config, zone)
-    print(f"[{config}] {len(days)} day(s), {len(seeds)} seed(s), "
-          f"{args.calibration_years}-year window, recalibrating daily; "
+    print(f"[{config}] {len(days)} forecast day(s) from {len(refits)} refit(s) "
+          f"(recalibrating every {cadence} day(s)), {len(seeds)} seed(s), "
+          f"{args.calibration_years}-year window; "
           f"{expected_input_width(config, zone)} inputs -> "
-          f"{24 * len(out_zones)} outputs")
+          f"{24 * len(out_zones)} outputs"
+          + (f"; this process stops after {max_days_per_process} new day(s)"
+             if max_days_per_process else ""))
 
     os.makedirs(args.out_dir, exist_ok=True)
     run_dir = run_dir_for(config, zone, begin_test, end_test, args.out_dir,
@@ -623,24 +688,42 @@ def main(argv=None):
     run_started = time.time()
     computed_days = 0
 
-    for n, day in enumerate(days, 1):
+    chunk_days = 0
+    chunk_exhausted = False
+    sampled_bucket = 0
+    memory_path = os.path.join(run_dir, "memory.csv")
+    _sample_rss(memory_path, run_id_label, 0, already, "chunk start")
+
+    for n, refit_day in enumerate(refits, 1):
+        covered = [d for d in RS.days_served_by(
+            refit_day, begin_test, end_test, cadence) if d in day_set]
+        # Only fit if some seed still owes one of the days this fit serves.
+        pending = {seed: [d for d in covered
+                          if not forecasts[seed].loc[d].notna().all()]
+                   for seed in seeds}
+        if not any(pending.values()):
+            continue
+
+        if chunk_exhausted:
+            break
+
         day_started = time.time()
         ran = []
         for seed in seeds:
-            if forecasts[seed].loc[day].notna().all():
+            need = pending[seed]
+            if not need:
                 continue
-            started = time.time()
-            prediction = models[seed].recalibrate_and_forecast_next_day(
-                source, day)
-            elapsed = time.time() - started
 
-            # The forecast comes back as (1, k) when a scaler is set (the
-            # scaler's inverse_transform reshapes) and (k,) when it is not, so
-            # flatten rather than assume either.
-            forecasts[seed].loc[day, :] = np.asarray(
-                prediction, dtype=float).reshape(-1)
-            timings.append(elapsed)
-            ran.append(seed)
+            # Always fit at the grid's refit day, never at the first day that
+            # happens to be missing. The schedule is a function of the calendar,
+            # so a resumed run refits exactly where an uninterrupted one did and
+            # reproduces it -- which is what makes chunking safe.
+            predictions, seconds = models[seed].recalibrate_and_forecast_days(
+                source, refit_day, need)
+
+            for row, day in enumerate(need):
+                forecasts[seed].loc[day, :] = np.asarray(
+                    predictions[row], dtype=float).reshape(-1)
 
             weights = getattr(models[seed], "zone_weights", None)
             if weights:
@@ -650,22 +733,66 @@ def main(argv=None):
             # recalibration. Rows for days not yet reached are still all-NaN and
             # are dropped on read, by _load_checkpoint and by the evaluator alike.
             forecasts[seed].to_csv(forecast_paths[seed])
-            _append_timing(timing_paths[seed], {
-                "date": day.isoformat(), "seed": seed,
-                "seconds": round(elapsed, 3),
-                "calibration_window_years": args.calibration_years,
-                "config": config, "model": "DNN",
-            })
+
+            # One row per forecast day. The fit is charged to the day it was
+            # made for and the reused days carry only their forward pass, so the
+            # file shows what the cadence actually costs rather than an average
+            # that hides it.
+            for row, day in enumerate(need):
+                is_refit = day == refit_day
+                elapsed = (seconds["fit_seconds"] if is_refit else 0.0) \
+                    + seconds["predict_seconds"][row]
+                timings.append(elapsed)
+                _append_timing(timing_paths[seed], {
+                    "date": day.isoformat(), "seed": seed,
+                    "seconds": round(elapsed, 3),
+                    "refit": bool(is_refit),
+                    "refit_day": refit_day.isoformat(),
+                    "fit_seconds": round(seconds["fit_seconds"], 3)
+                                   if is_refit else 0.0,
+                    "predict_seconds": round(seconds["predict_seconds"][row], 3),
+                    "calibration_window_years": args.calibration_years,
+                    "recalibration_days": cadence,
+                    "config": config, "model": "DNN",
+                })
+            ran.append(seed)
 
         if not ran:
             continue
 
+        # TensorFlow does not hand back everything clear_session() releases;
+        # collecting here does not fix that, but it does return what Python can
+        # and it costs milliseconds against a fit of tens of seconds.
+        gc.collect()
+
+        newly_done = len({d for seed in seeds for d in pending[seed]})
+        chunk_days += newly_done
         computed_days += 1
-        per_day = (time.time() - run_started) / computed_days
-        eta = (len(days) - n) * per_day
-        print(f"  [{n}/{len(days)}] {day.date()}  "
-              f"seed(s) {','.join(str(s) for s in ran)}  "
+        done_days = sum(1 for d in days
+                        if all(forecasts[s].loc[d].notna().all() for s in seeds))
+        per_refit = (time.time() - run_started) / computed_days
+        remaining_refits = max(len(refits) - n, 0)
+        eta = remaining_refits * per_refit
+        print(f"  [{n}/{len(refits)} refits, {done_days}/{len(days)} days] "
+              f"{refit_day.date()}  seed(s) {','.join(str(s) for s in ran)}  "
               f"{time.time() - day_started:6.1f}s   eta {eta / 3600:5.1f}h")
+
+        # One sample per RSS_SAMPLE_DAYS crossed, not one per day that happens
+        # to land near a multiple: a refit adds `cadence` days at once, so a
+        # modulo test fires twice at every boundary.
+        bucket = chunk_days // RS.RSS_SAMPLE_DAYS
+        if bucket > sampled_bucket:
+            sampled_bucket = bucket
+            _sample_rss(memory_path, run_id_label, chunk_days, done_days,
+                        "periodic")
+
+        if max_days_per_process and chunk_days >= max_days_per_process:
+            chunk_exhausted = True
+
+    _sample_rss(memory_path, run_id_label, chunk_days,
+                sum(1 for d in days
+                    if all(forecasts[s].loc[d].notna().all() for s in seeds)),
+                "chunk end")
 
     # Mean first-layer weight magnitude per zone, across the days this process
     # computed. With the block toggles gone for wide/joint this is what stands in
@@ -694,6 +821,9 @@ def main(argv=None):
         "test_days": len(days),
         "seeds": seeds,
         "calibration_window_years": args.calibration_years,
+        "recalibration_days": cadence,
+        "refits": len(refits),
+        "days_per_process": max_days_per_process,
         "nlayers": args.nlayers,
         "hyperopt_evals": max_evals,
         "hyperopt_range": [str(hyperopt_begin.date()), str(hyperopt_end.date())],
@@ -710,6 +840,14 @@ def main(argv=None):
         json.dump(manifest, handle, indent=2, default=str)
 
     print(f"\nwritten: {run_dir}")
+
+    if chunk_exhausted:
+        done_days = sum(1 for d in days
+                        if all(forecasts[s].loc[d].notna().all() for s in seeds))
+        print(f"\nstopping after {chunk_days} new day(s) in this process; "
+              f"{done_days}/{len(days)} done. The scheduler restarts from the "
+              f"checkpoint -- this is not a failure.")
+        return CHUNK_INCOMPLETE
 
     if args.no_evaluate:
         return 0

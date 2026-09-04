@@ -37,6 +37,8 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
+from dnn_dk1 import procs
+
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUT = os.path.join(THIS_DIR, "experiments")
 PHASE2_DIR = os.path.join(DEFAULT_OUT, "dnn_phase2")
@@ -58,7 +60,9 @@ WATCH_SECONDS = 60
 # history cannot tell a long search from a stuck one.
 PROGRESS_COLUMNS = ["timestamp", "run_id", "state", "days_done", "seeds_done",
                     "seconds_per_day_recent", "eta_utc", "phase",
-                    "hyperopt_trials_done"]
+                    "hyperopt_trials_done", "rss_mb", "peak_rss_mb"]
+
+RS_MAX_CONCURRENT = 5
 
 
 def _fmt(seconds):
@@ -105,25 +109,49 @@ def _phase1_rates():
 def _process_alive(pid, run_id):
     """Whether ``pid`` is a live process that is actually this run.
 
-    A bare ``pid_exists`` is not enough: PIDs are reused, and after a reboot the
-    number in the manifest may well belong to something else entirely. The
-    command line is checked so a recycled PID cannot be reported as a healthy
-    backtest.
+    Kept because it is the honest answer for a *specific* PID, and the tests
+    pin it. It is no longer how :func:`collect` decides liveness -- see
+    :mod:`dnn_dk1.procs`: a run is a sequence of worker processes now, one per
+    chunk, so the PID in the manifest goes stale roughly every hundred days.
     """
+    from dnn_dk1 import procs
+
     if not pid:
         return False, None
-    try:
-        import psutil
-    except ImportError:
+    alive = procs.is_alive(pid)
+    if alive is None:
         return None, "psutil not installed; liveness unknown"
+    if not alive:
+        try:
+            import psutil
+
+            psutil.Process(int(pid))
+            return False, "pid reused by another process"
+        except Exception:
+            return False, None
+    return True, None
+
+
+def _latest_rss(run_dir):
+    """The most recent RSS sample a worker wrote, in bytes.
+
+    Workers sample themselves every RSS_SAMPLE_DAYS forecast days into their own
+    ``memory.csv`` -- one writer per file, because five concurrent runs
+    appending to one shared CSV would interleave.
+    """
+    path = os.path.join(run_dir, "memory.csv")
+    if not os.path.exists(path):
+        return None, None
     try:
-        process = psutil.Process(int(pid))
-        command = " ".join(process.cmdline())
-    except Exception:
-        return False, None
-    if "run_dnn_dk1.py" not in command:
-        return False, "pid reused by another process"
-    return True, command
+        frame = pd.read_csv(path)
+    except (OSError, ValueError, pd.errors.EmptyDataError):
+        return None, None
+    if frame.empty or "rss_bytes" not in frame:
+        return None, None
+    latest = frame["rss_bytes"].dropna()
+    peak = frame.get("peak_rss_bytes", latest).dropna()
+    return (int(latest.iloc[-1]) if len(latest) else None,
+            int(peak.max()) if len(peak) else None)
 
 
 def _run_dir_for(run, out_dir):
@@ -244,6 +272,8 @@ def collect(out_dir=DEFAULT_OUT, log_dir=DEFAULT_LOG_DIR, now=None):
     now = time.time() if now is None else now
     manifest = _load_manifest()
     fallback_rates = _phase1_rates()
+    scheduler_pids, _ = procs.live_scheduler()
+    scheduler_alive = bool(scheduler_pids)
     states = []
 
     for run in RS.RUNS:
@@ -268,17 +298,33 @@ def collect(out_dir=DEFAULT_OUT, log_dir=DEFAULT_LOG_DIR, now=None):
         seconds_per_day, window = _recent_seconds_per_day(timings)
         estimated = False
         if seconds_per_day is None and run.config in fallback_rates:
+            # Phase 1 measured one fit. With a recalibration cadence of N days
+            # a fit serves N forecast days, so the per-day cost is that over N.
             seconds_per_day = (fallback_rates[run.config]["recalibration"]
-                               * seeds_expected)
+                               * seeds_expected / RS.RECALIBRATION_DAYS)
             estimated = True
 
         trials_path, trials_done = _hyperopt_progress(run, out_dir)
         in_hyperopt = days_done == 0 and (trials_done or 0) < RS.MAX_EVALS
 
-        alive, command = _process_alive(record.get("pid"), run.run_id)
+        # Liveness by command line: the worker's PID changes every chunk.
+        worker_pids, certain = procs.live_workers(run)
+        alive = True if worker_pids else (None if not certain else False)
         last_progress = _last_progress_time(run_dir if os.path.isdir(run_dir)
                                             else out_dir, trials_path)
         idle = (now - last_progress) if last_progress else None
+
+        sampled_rss, peak_rss = _latest_rss(run_dir)
+        live_rss = procs.rss_bytes(worker_pids) if worker_pids else None
+
+        # A worker that started a minute ago has not stalled, whatever the
+        # mtimes say. Its run directory may hold nothing yet and the newest file
+        # in sight can be this morning's trials file, which would otherwise read
+        # as half a day of silence the moment the run starts.
+        started_at = procs.started_at(worker_pids)
+        if started_at is not None:
+            last_progress = max(last_progress or 0.0, started_at)
+            idle = now - last_progress
 
         # Remaining hyperparameter evaluations, at the phase 1 per-evaluation
         # mean. Only an estimate, but the alternative is showing nothing for the
@@ -293,11 +339,12 @@ def collect(out_dir=DEFAULT_OUT, log_dir=DEFAULT_LOG_DIR, now=None):
         elif alive:
             state = ("stalled" if idle is not None and idle > STALL_SECONDS
                      else "running")
-        elif record.get("pid"):
-            state = "failed"
+        elif scheduler_alive:
+            # No worker right now, but the scheduler is up: this run is either
+            # waiting for a slot or between chunks. Both are normal, and calling
+            # it "failed" would cry wolf every hundred days on every run.
+            state = "queued"
         elif days_done or os.path.isdir(run_dir):
-            # Artifacts but no process this launcher knows of: an earlier run
-            # that is no longer alive. Not queued -- something started it.
             state = "failed"
         else:
             state = "queued"
@@ -348,7 +395,12 @@ def collect(out_dir=DEFAULT_OUT, log_dir=DEFAULT_LOG_DIR, now=None):
             "eta_utc": (
                 (datetime.now(timezone.utc) + timedelta(seconds=eta_seconds))
                 .strftime("%Y-%m-%dT%H:%M:%SZ") if eta_seconds else None),
-            "pid": record.get("pid"),
+            "pid": worker_pids[0] if worker_pids else record.get("pid"),
+            "worker_pids": worker_pids,
+            "scheduler_alive": scheduler_alive,
+            "rss_bytes": live_rss or sampled_rss,
+            "rss_sampled_bytes": sampled_rss,
+            "peak_rss_bytes": peak_rss,
             "idle_seconds": idle,
             "run_dir": run_dir,
             "log": record.get("log") or os.path.join(log_dir, f"{run.run_id}.log"),
@@ -360,10 +412,13 @@ def render(states):
     """The table, plus the footer that answers "when will this be finished?"."""
     from dnn_dk1 import runs as RS
 
+    global RS_MAX_CONCURRENT
+    RS_MAX_CONCURRENT = RS.MAX_CONCURRENT
+
     lines = [
         f"{'run':<10} {'state':<8} {'days':>9} {'pct':>6} {'seeds':>6} "
-        f"{'elapsed':>10} {'s/day':>8} {'eta':>10}  finish (UTC)",
-        "-" * 92,
+        f"{'elapsed':>10} {'s/day':>8} {'RSS':>7} {'eta':>10}  finish (UTC)",
+        "-" * 101,
     ]
     for row in states:
         rate = ("-" if row["seconds_per_day_recent"] is None
@@ -377,11 +432,13 @@ def render(states):
                         if done is not None else "hpo ...")
         else:
             progress = f"{row['days_done']:>4}/{row['days_total']:<4}"
+        rss = ("-" if not row.get("rss_bytes")
+               else f"{row['rss_bytes'] / 1e9:.2f}G")
         lines.append(
             f"{row['run_id']:<10} {row['state']:<8} "
             f"{progress:>9} "
             f"{row['pct']:>5.1f}% {row['seeds_done']:>6} "
-            f"{_fmt(row['elapsed_seconds']):>10} {rate:>8} "
+            f"{_fmt(row['elapsed_seconds']):>10} {rate:>8} {rss:>7} "
             f"{_fmt(row['eta_seconds']):>10}  {row['eta_utc'] or '-'}")
 
     done = sum(row["days_done"] for row in states)
@@ -393,17 +450,28 @@ def render(states):
     for row in states:
         counts[row["state"]] = counts.get(row["state"], 0) + 1
 
-    lines.append("-" * 92)
+    lines.append("-" * 101)
+    total_rss = sum(row.get("rss_bytes") or 0 for row in states)
     lines.append(
         f"{'ALL':<10} {'':8} {done:>4}/{total:<4} "
         f"{100.0 * done / total:>5.1f}% {'':>6} "
         f"{_fmt(max(elapsed)) if elapsed else '-':>10} {'':>8} "
+        f"{(str(round(total_rss / 1e9, 2)) + 'G') if total_rss else '-':>7} "
         f"{_fmt(max(etas)) if etas else '-':>10}  "
         + (f"last run finishes "
            f"{(datetime.now(timezone.utc) + timedelta(seconds=max(etas))).strftime('%Y-%m-%dT%H:%M:%SZ')}"
            if etas else "no active run"))
     lines.append("  " + ", ".join(f"{n} {state}" for state, n
                                   in sorted(counts.items())))
+    scheduler, certain = procs.live_scheduler()
+    if scheduler:
+        lines.append(f"  scheduler alive (pid {scheduler[0]}): it admits at "
+                     f"most {RS_MAX_CONCURRENT} runs at once and restarts each "
+                     f"one after every chunk")
+    elif certain and any(row["state"] != "done" for row in states):
+        lines.append("  NO SCHEDULER RUNNING -- queued runs will not start and "
+                     "finished chunks will not resume; "
+                     "`python run_dnn_all.py` starts one")
     if any(row["rate_is_estimate"] for row in states):
         lines.append("  ~ = rate estimated from the phase 1 timings; this run "
                      "has not produced a day of its own yet")
@@ -411,8 +479,11 @@ def render(states):
         lines.append(f"  stalled = process alive, no new completed day in "
                      f"{STALL_SECONDS // 60} minutes")
     if any(row["state"] == "failed" for row in states):
-        lines.append("  failed  = process gone with days remaining; "
-                     "`python run_dnn_all.py` resumes it from its checkpoint")
+        lines.append("  failed  = process gone with days remaining and no "
+                     "scheduler; `python run_dnn_all.py` resumes it")
+    if any(row["state"] == "queued" and row["days_done"] for row in states):
+        lines.append("  queued  = waiting for a slot, or between chunks; the "
+                     "scheduler restarts it from its checkpoint")
     if any(row["phase"] == "hyperopt" and row["state"] not in ("queued", "done")
            for row in states):
         lines.append("  hpo n/300 = still searching hyperparameters; the "
@@ -432,6 +503,10 @@ def heartbeat_row(states):
         "eta_utc": row["eta_utc"],
         "phase": row["phase"],
         "hyperopt_trials_done": row["hyperopt_trials_done"],
+        "rss_mb": (round(row["rss_bytes"] / 1e6) if row.get("rss_bytes")
+                   else None),
+        "peak_rss_mb": (round(row["peak_rss_bytes"] / 1e6)
+                        if row.get("peak_rss_bytes") else None),
     } for row in states], columns=PROGRESS_COLUMNS)
 
 

@@ -9,6 +9,7 @@ Lago lag layout) is checked against upstream's own code here.
 Training a real model is left to ``python run_dnn_dk1.py --config joint --smoke``.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -564,9 +565,157 @@ class TestPhase2Runs(unittest.TestCase):
         self.assertEqual(RS.RUNS_BY_ID["joint"].n_outputs, 168)
 
     def test_threads_fit_the_machine(self):
+        """What matters is what is resident at once, not the sum over ten runs.
+
+        Ten processes on eight physical cores is what made joint nine times
+        slower than phase 1 measured it alone. The scheduler admits joint on
+        four threads plus four single-threaded runs: eight threads, eight cores.
+        """
         from dnn_dk1 import runs as RS
 
-        self.assertEqual(RS.TOTAL_THREADS, 15)
+        self.assertEqual(RS.CONCURRENT_THREADS, 8)
+        self.assertEqual(RS.MAX_CONCURRENT, 5)
+        self.assertEqual(RS.RUNS_BY_ID["joint"].threads, 4)
+        for run in RS.RUNS:
+            if run.config != "joint":
+                self.assertEqual(run.threads, 1, run.run_id)
+
+
+class TestRecalibrationCadence(unittest.TestCase):
+    """One fit every ``RECALIBRATION_DAYS`` days, all 731 days still forecast.
+
+    The test period does not shrink. Only the weights age -- by at most
+    ``cadence - 1`` days -- while every forecast day's inputs are rebuilt for
+    itself from data known at its own gate closure.
+    """
+
+    def test_the_grid_covers_every_test_day(self):
+        from dnn_dk1 import runs as RS
+
+        covered = []
+        for day in RS.refit_days():
+            covered += list(RS.days_served_by(day))
+        self.assertEqual(len(covered), RS.TEST_DAYS)
+        self.assertEqual(len(set(covered)), RS.TEST_DAYS)
+        self.assertEqual(min(covered), RS.BEGIN_TEST)
+        self.assertEqual(max(covered), RS.END_TEST)
+
+    def test_the_refit_count_is_what_was_asked_for(self):
+        from dnn_dk1 import runs as RS
+
+        self.assertEqual(RS.RECALIBRATION_DAYS, 2)
+        self.assertEqual(len(RS.refit_days()), 366)
+        self.assertEqual(RS.REFITS, 366)
+
+    def test_the_grid_is_absolute_not_relative_to_a_start(self):
+        """A chunk boundary must not shift which days get a fresh fit.
+
+        If the schedule were counted from wherever a process resumed, a resumed
+        run would refit on different days from an uninterrupted one and would
+        not reproduce it -- which would make the chunking unsound rather than
+        merely wasteful.
+        """
+        from dnn_dk1 import runs as RS
+
+        grid = set(RS.refit_days())
+        for offset in (0, 1, 2, 37, 100, 101, 730):
+            day = RS.BEGIN_TEST + pd.Timedelta(days=offset)
+            served_by = RS.refit_day_for(day)
+            self.assertIn(served_by, grid)
+            self.assertLessEqual(served_by, day)
+            self.assertLess((day - served_by).days, RS.RECALIBRATION_DAYS)
+
+    def test_a_day_is_never_served_by_a_later_fit(self):
+        """The fit that serves a day must not be trained on that day's future."""
+        from dnn_dk1 import runs as RS
+
+        for offset in range(0, RS.TEST_DAYS, 17):
+            day = RS.BEGIN_TEST + pd.Timedelta(days=offset)
+            self.assertLessEqual(RS.refit_day_for(day), day)
+
+
+class TestChunking(unittest.TestCase):
+    """A worker stops after a day budget and is restarted from its checkpoint."""
+
+    def test_the_chunk_exit_code_is_shared_and_distinct(self):
+        """The scheduler must tell a planned handover from a crash."""
+        import run_dnn_all
+        import run_dnn_dk1
+
+        self.assertEqual(run_dnn_dk1.CHUNK_INCOMPLETE, 75)
+        self.assertEqual(run_dnn_all.CHUNK_INCOMPLETE,
+                         run_dnn_dk1.CHUNK_INCOMPLETE)
+        self.assertNotEqual(run_dnn_dk1.CHUNK_INCOMPLETE, 0)
+
+    def test_the_command_line_states_the_cadence_and_the_chunk(self):
+        """Left to defaults, the manifest would not record what actually ran."""
+        import run_dnn_all
+        from dnn_dk1 import runs as RS
+
+        for run in RS.RUNS:
+            command = run_dnn_all.run_command(run, "out", "datasets")
+            with self.subTest(run=run.run_id):
+                self.assertTrue(run_dnn_all._has_pair(
+                    command, "--recalibration-days",
+                    str(RS.RECALIBRATION_DAYS)))
+                self.assertTrue(run_dnn_all._has_pair(
+                    command, "--max-days-per-process",
+                    str(RS.DAYS_PER_PROCESS)))
+
+    def test_overrides_reach_the_command_line(self):
+        import run_dnn_all
+        from dnn_dk1 import runs as RS
+
+        command = run_dnn_all.run_command(
+            RS.RUNS[0], "out", "datasets", cadence=3, days_per_process=7)
+        self.assertTrue(run_dnn_all._has_pair(command, "--recalibration-days", "3"))
+        self.assertTrue(run_dnn_all._has_pair(
+            command, "--max-days-per-process", "7"))
+
+    def test_the_admission_plan_respects_the_limit(self):
+        import run_dnn_all
+        from dnn_dk1 import runs as RS
+
+        waves = run_dnn_all._admission_plan(list(RS.RUNS))
+        self.assertEqual(len(waves[0]), RS.MAX_CONCURRENT)
+        self.assertEqual(waves[0][0].run_id, "joint")
+        for wave in waves[1:]:
+            self.assertLessEqual(len(wave), RS.MAX_OTHER_CONCURRENT)
+        self.assertEqual(sum(len(w) for w in waves), len(RS.RUNS))
+
+
+class TestProcessScan(unittest.TestCase):
+    """Liveness follows the run across chunk restarts, and matches only Python."""
+
+    def test_a_shell_that_merely_mentions_the_script_is_not_a_worker(self):
+        """This test's own command line mentions run_dnn_dk1.py.
+
+        Before the interpreter-name filter, a grep or a status query naming the
+        script counted as a live worker, and the launcher would refuse to start
+        a run that was not running.
+        """
+        from dnn_dk1 import procs
+
+        self.assertIn("python", procs._PYTHON_NAMES[0])
+        for name in ("bash.exe", "powershell.exe", "cmd.exe", "grep.exe"):
+            self.assertNotIn(name, procs._PYTHON_NAMES)
+
+    def test_scans_report_completeness_separately_from_emptiness(self):
+        from dnn_dk1 import procs
+        from dnn_dk1 import runs as RS
+
+        for found, certain in (procs.live_workers(RS.get("joint")),
+                               procs.live_scheduler(),
+                               procs.live_heartbeat()):
+            self.assertIsInstance(found, list)
+            self.assertIsInstance(certain, bool)
+
+    def test_started_at_and_rss_tolerate_dead_pids(self):
+        from dnn_dk1 import procs
+
+        self.assertIsNone(procs.started_at([999_999_999]))
+        self.assertIsNone(procs.rss_bytes([999_999_999]))
+        self.assertIsNone(procs.started_at([]))
 
     def test_the_settled_budget_is_identical_for_every_run(self):
         """An unequal budget between configurations confounds the comparison."""
@@ -659,17 +808,155 @@ class TestStatus(unittest.TestCase):
 
 
 class TestLauncherDetachment(unittest.TestCase):
+    """No console window -- including for the interpreter the venv stub re-execs.
 
-    def test_flags_detach_the_child_from_this_console(self):
+    A launch relying on DETACHED_PROCESS alone opened ten console windows, and
+    closing three of them killed three runs. The flags were applied correctly --
+    to the venv's Scripts/python.exe, which is a redirector stub that then starts
+    the real interpreter as a *new* process carrying none of them; Windows gave
+    that console-subsystem grandchild a console of its own. pythonw.exe is what
+    actually fixes it, because the GUI subsystem survives the extra hop.
+    """
+
+    def test_flags_ask_for_no_console_and_no_window(self):
         import run_dnn_all
 
         flags = run_dnn_all.detach_flags()
         if os.name == "nt":
-            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP -- no console to be
-            # killed with, and out of reach of a Ctrl-C here.
-            self.assertEqual(flags["creationflags"], 0x00000008 | 0x00000200)
+            value = flags["creationflags"]
+            self.assertTrue(value & 0x00000008, "DETACHED_PROCESS")
+            self.assertTrue(value & 0x08000000, "CREATE_NO_WINDOW")
+            self.assertTrue(value & 0x00000200, "CREATE_NEW_PROCESS_GROUP")
+            # CREATE_NEW_CONSOLE would make CreateProcess fail outright.
+            self.assertFalse(value & 0x00000010, "CREATE_NEW_CONSOLE must be off")
         else:
             self.assertTrue(flags["start_new_session"])
+
+    def test_runs_are_started_with_a_console_less_interpreter(self):
+        import run_dnn_all
+        from dnn_dk1 import runs as RS
+
+        if os.name != "nt":
+            self.skipTest("pythonw.exe is a Windows concern")
+        chosen = run_dnn_all.run_command(RS.RUNS[0], "out", "datasets")[0]
+        beside = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if os.path.exists(beside):
+            self.assertTrue(chosen.lower().endswith("pythonw.exe"), chosen)
+
+    def test_windowless_python_is_idempotent_and_falls_back(self):
+        import run_dnn_all
+
+        if os.name != "nt":
+            self.skipTest("Windows only")
+        already = os.path.join("C:", os.sep, "somewhere", "pythonw.exe")
+        self.assertEqual(run_dnn_all.windowless_python(already), already)
+        # Nothing beside it: keep what we were given rather than invent a path.
+        missing = os.path.join("C:", os.sep, "not", "here", "python.exe")
+        self.assertEqual(run_dnn_all.windowless_python(missing), missing)
+
+    def test_no_shell_or_console_owning_wrapper_in_the_command(self):
+        """The thread settings go through env=, not through a cmd wrapper."""
+        import run_dnn_all
+        from dnn_dk1 import runs as RS
+
+        for run in RS.RUNS:
+            command = run_dnn_all.run_command(run, "out", "datasets")
+            with self.subTest(run=run.run_id):
+                head = os.path.basename(command[0]).lower()
+                self.assertNotIn(head, {"cmd.exe", "cmd", "powershell.exe",
+                                        "start", "conhost.exe"})
+                self.assertNotIn("/c", command)
+                env = run_dnn_all.run_env(run)
+                self.assertEqual(env["OMP_NUM_THREADS"], str(run.threads))
+                self.assertEqual(env["TF_NUM_INTRAOP_THREADS"], str(run.threads))
+                self.assertEqual(env["TF_NUM_INTEROP_THREADS"], str(run.threads))
+
+
+class TestLivenessGuard(unittest.TestCase):
+    """Re-running the launcher must never start a second copy of a live run.
+
+    Two processes writing one run's per-day checkpoint would leave a file
+    holding neither run's forecasts, and nothing downstream could tell.
+    """
+
+    def test_this_process_is_not_mistaken_for_a_run(self):
+        """A recycled PID must not read as a healthy backtest."""
+        import run_dnn_all
+
+        self.assertFalse(run_dnn_all.process_is_alive(os.getpid()))
+
+    def test_a_dead_or_absent_pid_is_not_alive(self):
+        import run_dnn_all
+
+        self.assertFalse(run_dnn_all.process_is_alive(None))
+        self.assertFalse(run_dnn_all.process_is_alive(999_999_999))
+
+    def test_unknown_liveness_blocks_rather_than_allows(self):
+        """None means "cannot tell", and must not be read as "dead".
+
+        Refusing to start is recoverable by waiting; two writers on one
+        checkpoint is not.
+        """
+        import inspect
+
+        import run_dnn_all
+
+        source = inspect.getsource(run_dnn_all.main)
+        self.assertIn("alive is not False", source)
+
+    def test_argument_pair_matching_is_token_exact(self):
+        import run_dnn_all
+
+        argv = ["python", "run_dnn_dk1.py", "--config", "own", "--zone", "DK1"]
+        self.assertTrue(run_dnn_all._has_pair(argv, "--zone", "DK1"))
+        self.assertFalse(run_dnn_all._has_pair(argv, "--zone", "DK2"))
+        # A path that merely contains the value must not count.
+        argv = ["python", "run_dnn_dk1.py", "--out-dir", "C:/x/DK1",
+                "--zone", "DK2"]
+        self.assertFalse(run_dnn_all._has_pair(argv, "--zone", "DK1"))
+        self.assertTrue(run_dnn_all._has_pair(argv, "--zone", "DK2"))
+        self.assertTrue(run_dnn_all._has_pair(["--zone=DK2"], "--zone", "DK2"))
+
+    def test_the_scan_reports_whether_it_completed(self):
+        """A partial scan must be distinguishable from "found nothing"."""
+        import run_dnn_all
+        from dnn_dk1 import runs as RS
+
+        found, certain = run_dnn_all.live_processes_for(RS.get("joint"))
+        self.assertIsInstance(found, list)
+        self.assertIsInstance(certain, bool)
+
+    def test_manifest_pids_survive_a_missing_or_corrupt_file(self):
+        import tempfile
+
+        import run_dnn_all
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                run_dnn_all.manifest_pids(os.path.join(tmp, "nope.json")), {})
+            broken = os.path.join(tmp, "broken.json")
+            with open(broken, "w", encoding="utf-8") as handle:
+                handle.write("{not json")
+            self.assertEqual(run_dnn_all.manifest_pids(broken), {})
+
+    def test_manifest_pids_reads_history_as_well_as_the_latest_launch(self):
+        import tempfile
+
+        import run_dnn_all
+
+        payload = {
+            "runs": [{"run_id": "joint", "pid": 111}],
+            "heartbeat": {"pid": 999},
+            "history": [{"runs": [{"run_id": "own_SE3", "pid": 222}]}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            pids = run_dnn_all.manifest_pids(path)
+        self.assertEqual(pids["joint"], 111)
+        self.assertEqual(pids["own_SE3"], 222)
+        self.assertEqual(pids["__heartbeat__"], 999)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
